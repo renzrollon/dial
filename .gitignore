@@ -1,0 +1,53 @@
+# macOS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Node
+node_modules/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude Code runtime state — generated per-repo, never committed
+.claude/settings.local.json
+.claude/graph/
+.claude/autonomy.json
+.claude/testing/
+.claude/metrics/
+.claude/handoff/
+.claude/pending-approval/
+.claude/.cc-writes/
+.claude/learning/
+.claude/plans/
+.claude/commands/
+.claude/memory/
+.claude/ship/
+.claude/skills/
+
+# Compound-notes writer's transient lock and staging file (lib/notes.mjs)
+docs/notes/compound.md.lock
+docs/notes/compound.md.tmp
+
+# Cursor IDE
+.cursor/
+
+#Copilot
+.github/agents/
+.github/prompts/
+.github/workflows/copilot-setup-steps.yml
+.github/skills/
+
+# Backups produced by installers/tooling
+*.bak
+*.bak.*
+
+# temp documentation
+.docs/
+research_notes/
+reports/

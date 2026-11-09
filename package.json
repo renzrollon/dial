@@ -1,0 +1,21 @@
+{
+  "name": "dial",
+  "version": "0.1.0",
+  "description": "Registers repositories against exactly one Obsidian vault each and keeps the work/personal boundary sound.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "dial": "bin/dial.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.mjs'"
+  },
+  "files": [
+    "bin/",
+    "lib/",
+    "README.md"
+  ]
+}

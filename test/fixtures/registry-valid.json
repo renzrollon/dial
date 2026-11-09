@@ -1,0 +1,15 @@
+{
+  "dial_schema": "dial.registry/1",
+  "vaults": {
+    "personal": "/vaults/personal",
+    "work": "/vaults/work"
+  },
+  "repos": [
+    {
+      "path": "/repos/katipon",
+      "vault": "personal",
+      "host": "github"
+    }
+  ],
+  "limits": {}
+}
