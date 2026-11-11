@@ -1,0 +1,2 @@
+{"schema":"interlock.ship-run/1","ts":"2026-11-09T15:00:01Z","runId":"7a587a81","change":"add-login","seq":1,"type":"run-start"}
+{"schema":"interlock.ship-run/1","ts":"2026-11-09T15:30:00Z","runId":"7a587a81","change":"add-login","seq":4,"type":"agent-spawn"}

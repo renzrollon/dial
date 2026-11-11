@@ -1,0 +1,5 @@
+{"schema":"interlock.ship-run/1","ts":"2026-11-09T15:00:01Z","runId":"7a587a81","change":"add-login","seq":1,"type":"run-start"}
+not json at all
+{"schema":"interlock.ship-run/0","ts":"2026-11-09T16:00:00Z","type":"run-complete"}
+{"schema":"interlock.ship-run/1","ts":"2026-11-09T16:22:00Z","runId":"7a587a81","change":"add-login","seq":9,"type":"run-halt","reason":"verify red"}
+{"schema":"interlock.ship-run/1","ts":"2026-11-09T16:22:05Z","runId":"7a587a81","change":"add-login","seq":10,"type":"run-teleport"}
