@@ -16,6 +16,10 @@
   "files": [
     "bin/",
     "lib/",
+    "hooks/",
+    "skills/",
+    "templates/",
+    ".claude-plugin/",
     "README.md"
   ]
 }

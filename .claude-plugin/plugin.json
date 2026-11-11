@@ -1,0 +1,7 @@
+{
+  "name": "dial",
+  "version": "0.1.0",
+  "description": "Keeps each repository's Obsidian vault ledger current: a session brief on start, a recorded session on end, and /dial:handoff and /dial:next.",
+  "author": { "name": "Carl Rollon" },
+  "license": "MIT"
+}

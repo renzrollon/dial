@@ -1,0 +1,4 @@
+{"schema":"interlock.outcome/2","ts":"2026-11-09T12:00:00Z","change":"add-login","observed":{"commit":"1111111","mergeVerdict":"HUMAN"}}
+{"schema":"interlock.outcome/2","ts":"2026-11-10T08:00:00Z","change":"add-login","observed":{"commit":"3f50683","mergeVerdict":"MERGE"}}
+{"schema":"interlock.outcome/2","ts":"2026-11-10T09:00:00Z","change":"fix-cache","observed":{"commit":null,"mergeVerdict":null}}
+garbage line

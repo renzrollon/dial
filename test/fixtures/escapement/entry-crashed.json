@@ -1,0 +1,14 @@
+{
+  "id": "q-123",
+  "repo": "__REPO__",
+  "change": "add-login",
+  "flags": [],
+  "enqueuedAt": "2026-11-09T18:00:00Z",
+  "attempts": 1,
+  "host": "mbp",
+  "transitions": [
+    { "ts": "2026-11-09T18:00:00Z", "from": null, "to": "pending", "reason": "enqueued" },
+    { "ts": "2026-11-09T18:05:00Z", "from": "pending", "to": "running", "reason": "claimed" },
+    { "ts": "2026-11-09T19:00:00Z", "from": "running", "to": "done", "reason": "complete" }
+  ]
+}

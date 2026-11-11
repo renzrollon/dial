@@ -1,0 +1,18 @@
+{
+  "root": ".",
+  "unarchived": [],
+  "stale": {
+    "skipped": true,
+    "reason": "no graph has been built — run /interlock:bootstrap once",
+    "broken": [],
+    "aging": [],
+    "graphBuiltAt": null
+  },
+  "orphans": {
+    "skipped": true,
+    "reason": "no --changed file list was supplied",
+    "orphans": [],
+    "considered": 0
+  },
+  "hasFindings": false
+}

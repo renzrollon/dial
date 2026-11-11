@@ -1,0 +1,5 @@
+{"ts":"2026-11-10T08:00:00Z","event":"observation","entry":"q-123","detail":{"class":"info","category":"progress","reason":"wave 1 done","runId":"7a587a81"}}
+this line is not json
+{"ts":"2026-11-10T08:30:00Z","event":"claim","entry":"q-123"}
+{"ts":"2026-11-10T09:00:00Z","event":"observation","entry":"q-999","detail":{"class":"halt","category":"other","reason":"x","runId":"zzz"}}
+{"ts":"2026-11-10T09:10:00Z","event":"observation","entry":"q-123","detail":{"class":"halt","category":"verify-red","reason":"tests failed","runId":"7a587a81"}}

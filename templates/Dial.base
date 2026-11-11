@@ -1,0 +1,47 @@
+filters:
+  and:
+    - type == "change"
+views:
+  - name: Needs me
+    type: kanban
+    filters:
+      and:
+        - needs_me == true
+        - state != "archived"
+    groupBy:
+      property: note.state
+      direction: ASC
+    groupOrder: [archived, dropped, archive-pending, conflict, ci-red, needs-fix, manual-test, pr-open, shipped, halted, shipping, queued, checkpoint, spec-draft]
+    order:
+      - file.name
+      - repo
+      - state
+      - last_activity
+  - name: In flight
+    type: table
+    filters: 'state == "queued" || state == "shipping"'
+    order:
+      - file.name
+      - repo
+      - state
+      - last_activity
+  - name: Stale
+    type: table
+    filters:
+      and:
+        - stale == true
+    order:
+      - file.name
+      - repo
+      - state
+      - last_activity
+  - name: By repo
+    type: table
+    groupBy:
+      property: note.repo
+      direction: ASC
+    order:
+      - file.name
+      - state
+      - needs_me
+      - last_activity

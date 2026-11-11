@@ -9,14 +9,18 @@
  *   these tests assume none exists on the machine running them.
  */
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
+import { plist } from '../lib/agent.mjs'
 import { diagnose, formatDoctor } from '../lib/doctor.mjs'
-import { FIXTURES, makeGitDir, makeHome, makeVault, readJson, snapshotTree, tmp, writeJson } from './helpers.mjs'
+import { FIXTURES, fakeBinary, makeGitDir, makeHome, makeVault, readJson, snapshotTree, tmp, writeJson } from './helpers.mjs'
 
 const STATUSES = ['ok', 'warn', 'fail', 'skip']
-const IDS = ['node', 'home', 'registry', 'obsidian-cli', 'boundary', 'permissions']
+const IDS = [
+  'node', 'home', 'registry', 'obsidian-cli', 'boundary', 'permissions',
+  'vault-scaffold', 'vault-nesting', 'narrate-endpoint', 'launch-agent', 'on-path', 'fields',
+]
 const SNIPPET_HEAD = 'Add to ~/.claude/settings.json → permissions.allow:'
 
 const fixture = name => readFileSync(join(FIXTURES, name), 'utf8')
@@ -32,8 +36,14 @@ const fixture = name => readFileSync(join(FIXTURES, name), 'utf8')
  */
 function world(opts = {}) {
   const root = tmp('dial-doctor-')
-  const personal = makeVault(join(root, 'personal'))
-  const work = makeVault(join(root, 'work'))
+  const scaffold = dir => {
+    makeVault(dir, [{ path: 'Dial.base', body: '' }])
+    mkdirSync(join(dir, 'Projects'), { recursive: true })
+    mkdirSync(join(dir, 'Changes'), { recursive: true })
+    return dir
+  }
+  const personal = scaffold(join(root, 'personal'))
+  const work = scaffold(join(root, 'work'))
   const repo = makeGitDir(join(root, 'repos', 'katipon'))
   const greenRegistry = {
     dial_schema: 'dial.registry/1',
@@ -58,19 +68,30 @@ function world(opts = {}) {
 
   const binDir = join(root, 'bin')
   mkdirSync(binDir, { recursive: true })
+  // The twelve-check green machine: a narrate endpoint, a running LaunchAgent and `dial` on PATH.
+  const launchctl = fakeBinary(binDir, 'launchctl', 'echo "state = running"; echo "pid = 4242"')
+  if (opts.dialOnPath !== false) fakeBinary(binDir, 'dial', 'exit 0')
+  if (opts.narrate !== false) {
+    put(join(userHome, '.pi', 'agent', 'models.json'), {
+      providers: { mtplx: { baseUrl: 'http://127.0.0.1:8000/v1', apiKey: 'sk-local-123', models: [{ id: 'mtplx-qwen38-27b-optimized-speed' }] } },
+    })
+  }
+  if (opts.agent !== false) {
+    put(join(userHome, 'Library', 'LaunchAgents', 'com.dial.sync.plist'), plist({ home, path: '' }))
+  }
   if (opts.obsidian) {
     writeFileSync(join(binDir, 'obsidian'), '#!/bin/sh\nexit 0\n')
     chmodSync(join(binDir, 'obsidian'), 0o755)
   }
   return {
     root, personal, work, repo, home, userHome, cwd,
-    env: { DIAL_HOME: home, HOME: userHome, PATH: '' },
+    env: { DIAL_HOME: home, HOME: userHome, PATH: '', DIAL_LAUNCHCTL_BIN: launchctl },
     pathDirs: [binDir],
     registryFile: join(home, 'registry.json'),
   }
 }
 
-const run = async (w, overrides = {}) => diagnose({ env: w.env, cwd: w.cwd, pathDirs: w.pathDirs, ...overrides })
+const run = async (w, overrides = {}) => diagnose({ env: w.env, cwd: w.cwd, pathDirs: w.pathDirs, platform: 'darwin', ...overrides })
 const byId = (report, id) => report.checks.find(c => c.id === id)
 const lines = text => text.split('\n')
 const text = report => formatDoctor(report)
@@ -132,18 +153,21 @@ test('a throwing check becomes a fail record and the others still report', async
 
 // ------------------------------------------------------------- header and exit
 
-test('all green: DIAL OK with 5 passed, the skip is not counted, home line follows', async () => {
+// Pins specs/doctor/spec.md, "The report has a header and exits 1 only on a failing check", scenarios
+// "All green" (twelve checks, `obsidian-cli` skip, the other eleven ok: `DIAL OK — 11 passed`) and
+// "Skips do not count as passed" (no narrate endpoint and no LaunchAgent as well: 9 passed, 3 skip).
+test('all green: DIAL OK with 11 passed, the skip is not counted, home line follows', async () => {
   const w = world()
   const report = await run(w)
   assert.equal(byId(report, 'obsidian-cli').status, 'skip')
-  for (const id of ['node', 'home', 'registry', 'boundary', 'permissions']) {
+  for (const id of IDS.filter(i => i !== 'obsidian-cli')) {
     assert.equal(byId(report, id).status, 'ok', `${id}: ${byId(report, id).detail}`)
   }
-  assert.equal(report.counts.ok, 5)
+  assert.equal(report.counts.ok, 11)
   assert.equal(report.counts.skip, 1)
   assert.equal(report.ok, true)
   const out = lines(text(report))
-  assert.equal(out[0], 'DIAL OK — 5 passed')
+  assert.equal(out[0], 'DIAL OK — 11 passed')
   assert.equal(out[1], `  home: ${w.home}`)
 })
 
@@ -172,9 +196,9 @@ test('one failure: DIAL BLOCKED, failures holds the id, ok is false', async () =
   const report = await run(w)
   assert.equal(report.counts.fail, 1)
   assert.deepEqual(report.failures, ['registry'])
-  assert.deepEqual(report.warnings, [])
+  assert.deepEqual(report.warnings, ['vault-scaffold']) // a vault with no directory has none of the layout either
   assert.equal(report.ok, false)
-  assert.equal(lines(text(report))[0], 'DIAL BLOCKED — 1 failing check(s)')
+  assert.equal(lines(text(report))[0], 'DIAL BLOCKED — 1 failing check(s), 1 warning(s)')
 })
 
 test('a failure and a warning together: BLOCKED header with the warning suffix', async () => {
@@ -184,8 +208,8 @@ test('a failure and a warning together: BLOCKED header with the warning suffix',
   writeJson(w.registryFile, reg)
   const report = await run(w)
   assert.deepEqual(report.failures, ['registry'])
-  assert.deepEqual(report.warnings, ['permissions'])
-  assert.equal(lines(text(report))[0], 'DIAL BLOCKED — 1 failing check(s), 1 warning(s)')
+  assert.deepEqual(report.warnings, ['permissions', 'vault-scaffold'])
+  assert.equal(lines(text(report))[0], 'DIAL BLOCKED — 1 failing check(s), 2 warning(s)')
 })
 
 // ------------------------------------------------------------------ rendering
@@ -604,4 +628,168 @@ test('snippet: a rendered uncovered permissions row carries the snippet under fi
   const fixAt = rows.findIndex((l, i) => i > at && l === `      fix: ${SNIPPET_HEAD}`)
   assert.ok(fixAt > at, out)
   assert.ok(rows.some(l => l === '           "Bash(dial:*)"'), out)
+})
+
+// ------------------------------------------------- the six advisory checks (specs/doctor/spec.md)
+
+test('skips do not count as passed: no endpoint and no agent leave 9 passed and 3 skips', async () => {
+  const report = await run(world({ narrate: false, agent: false }))
+  assert.deepEqual(report.checks.filter(c => c.status === 'skip').map(c => c.id), ['obsidian-cli', 'narrate-endpoint', 'launch-agent'])
+  assert.equal(report.counts.ok, 9)
+  assert.equal(report.counts.skip, 3)
+  assert.equal(lines(text(report))[0], 'DIAL OK — 9 passed')
+})
+
+test('new checks never block: unscaffolded, nested, paths-missing, off PATH is 6 passed and 4 warnings', async () => {
+  const w = world({ narrate: false, dialOnPath: false })
+  const inner = join(w.work, 'inner')
+  mkdirSync(inner, { recursive: true })
+  const reg = readJson(w.registryFile)
+  reg.vaults = { personal: w.personal, work: w.work, 'work-inner': inner }
+  writeJson(w.registryFile, reg)
+  writeFileSync(join(w.userHome, 'Library', 'LaunchAgents', 'com.dial.sync.plist'), plist({ node: '/gone/node', home: w.home, path: '' }))
+  const report = await run(w)
+  const statuses = Object.fromEntries(report.checks.map(c => [c.id, c.status]))
+  assert.equal(statuses['vault-scaffold'], 'warn')
+  assert.equal(statuses['vault-nesting'], 'warn')
+  assert.equal(statuses['launch-agent'], 'warn')
+  assert.equal(statuses['on-path'], 'warn')
+  assert.equal(report.counts.fail, 0)
+  assert.equal(report.counts.ok, 6)
+  assert.equal(lines(text(report))[0], 'DIAL OK — 6 passed, 4 warning(s)')
+  assert.equal(report.ok, true)
+})
+
+test('later checks survive a registry that does not load: scaffold and nesting skip, none fails', async () => {
+  const report = await run(world({ registry: '{ not json' }))
+  assert.equal(byId(report, 'registry').status, 'fail')
+  for (const id of ['vault-scaffold', 'vault-nesting']) {
+    assert.equal(byId(report, id).status, 'skip', id)
+    assert.equal(byId(report, id).detail, 'registry not loaded')
+  }
+  for (const id of IDS.slice(6)) assert.notEqual(byId(report, id).status, 'fail', id)
+})
+
+test('vault-scaffold: a vault without Dial.base warns with the fix; a bare vault lists all three; nothing is written', async () => {
+  const w = world()
+  rmSync(join(w.personal, 'Dial.base'))
+  rmSync(join(w.work, 'Projects'), { recursive: true })
+  rmSync(join(w.work, 'Changes'), { recursive: true })
+  rmSync(join(w.work, 'Dial.base'))
+  const before = [snapshotTree(w.personal), snapshotTree(w.work)]
+  const c = byId(await run(w), 'vault-scaffold')
+  assert.equal(c.status, 'warn')
+  assert.ok(c.evidence.includes('personal: missing Dial.base'), c.evidence.join('|'))
+  assert.ok(c.evidence.includes('work: missing Projects/, Changes/, Dial.base'), c.evidence.join('|'))
+  assert.equal(c.fix, 'dial vault init personal\ndial vault init work')
+  assert.deepEqual([snapshotTree(w.personal), snapshotTree(w.work)], before)
+})
+
+test('vault-scaffold: no vaults registered is ok', async () => {
+  const w = world({ registry: { dial_schema: 'dial.registry/1', vaults: {}, repos: [], limits: {} } })
+  assert.equal(byId(await run(w), 'vault-scaffold').status, 'ok')
+})
+
+test('vault-nesting: one vault inside another warns naming both; a shared prefix is not nesting', async () => {
+  const w = world()
+  const reg = readJson(w.registryFile)
+  const inner = join(w.work, 'work')
+  mkdirSync(inner, { recursive: true })
+  reg.vaults = { personal: w.personal, work: w.work, 'work-inner': inner }
+  writeJson(w.registryFile, reg)
+  const c = byId(await run(w), 'vault-nesting')
+  assert.equal(c.status, 'warn')
+  assert.equal(c.detail, 'vault work-inner lies inside vault work')
+  assert.ok(c.evidence.includes(`work: ${w.work}`) && c.evidence.includes(`work-inner: ${inner}`), c.evidence.join('|'))
+
+  const near = world()
+  const sibling = join(near.root, 'work2')
+  mkdirSync(sibling, { recursive: true })
+  const reg2 = readJson(near.registryFile)
+  reg2.vaults = { personal: near.personal, work: near.work, work2: sibling }
+  writeJson(near.registryFile, reg2)
+  const ok = byId(await run(near), 'vault-nesting')
+  assert.equal(ok.status, 'ok')
+  assert.equal(ok.detail, 'no nested vaults')
+})
+
+test('narrate-endpoint: pi models file resolves, no key is printed, the registry override wins, nothing is skip', async () => {
+  const w = world()
+  const report = await run(w)
+  const c = byId(report, 'narrate-endpoint')
+  assert.equal(c.status, 'ok')
+  assert.equal(c.detail, 'http://127.0.0.1:8000/v1 (mtplx-qwen38-27b-optimized-speed)')
+  assert.ok(!JSON.stringify(report).includes('sk-local-123'))
+  assert.ok(!text(report).includes('sk-local-123'))
+
+  const reg = readJson(w.registryFile)
+  reg.narrate = { url: 'http://127.0.0.1:9000/v1', model: 'qwen3.6' }
+  writeJson(w.registryFile, reg)
+  assert.equal(byId(await run(w), 'narrate-endpoint').detail, 'http://127.0.0.1:9000/v1 (qwen3.6)')
+
+  const none = byId(await run(world({ narrate: false })), 'narrate-endpoint')
+  assert.equal(none.status, 'skip')
+  assert.equal(none.detail, 'no narrate endpoint configured')
+})
+
+test('launch-agent: running is ok, absent is skip, loaded-not-running and paths-missing warn with the status fix', async () => {
+  const w = world()
+  assert.equal(byId(await run(w), 'launch-agent').status, 'ok')
+  assert.equal(byId(await run(world({ agent: false })), 'launch-agent').status, 'skip')
+
+  const idle = world()
+  fakeBinary(join(idle.root, 'bin'), 'launchctl', 'echo "state = not running"')
+  const c = byId(await run(idle), 'launch-agent')
+  assert.equal(c.status, 'warn')
+  assert.equal(c.detail, 'loaded-not-running')
+  assert.match(c.fix, /^launchctl kickstart -k gui\/\d+\/com\.dial\.sync$/)
+
+  const moved = world()
+  writeFileSync(join(moved.userHome, 'Library', 'LaunchAgents', 'com.dial.sync.plist'), plist({ node: '/gone/node', home: moved.home, path: '' }))
+  const m = byId(await run(moved), 'launch-agent')
+  assert.equal(m.status, 'warn')
+  assert.equal(m.detail, 'paths-missing')
+  assert.equal(m.fix, 'dial agent install')
+})
+
+test('on-path: an executable dial is ok with its path; none warns with npm i -g .', async () => {
+  const w = world()
+  const ok = byId(await run(w), 'on-path')
+  assert.equal(ok.status, 'ok')
+  assert.deepEqual(ok.evidence, [join(w.pathDirs[0], 'dial')])
+  const bad = byId(await run(world({ dialOnPath: false })), 'on-path')
+  assert.equal(bad.status, 'warn')
+  assert.equal(bad.detail, 'dial is not on PATH')
+  assert.equal(bad.fix, 'npm i -g .')
+})
+
+test('fields: always ok with the six evidence lines, even with no registry', async () => {
+  for (const w of [world(), world({ registry: false })]) {
+    const c = byId(await run(w), 'fields')
+    assert.equal(c.status, 'ok')
+    assert.equal(c.evidence.length, 6)
+    assert.ok(c.evidence[0].startsWith('change note: title, type, repo, change, scope, state, needs_me, stale,'))
+    assert.ok(c.evidence[1].startsWith('repo note: title, type, repo, scope,'))
+    assert.equal(c.evidence[2], 'summary note: type, tags, dial_schema')
+    assert.equal(c.evidence[3], 'daily note: type, updated')
+    assert.equal(c.evidence[4], 'review note: title, created, updated, type, status, tags, dial_schema')
+    assert.ok(c.evidence[5].startsWith('body sections: ## State (fact, value, evidence:'))
+  }
+})
+
+test('boundary: a repo entry under another vault\'s root fails naming path, root and both vaults; agreeing roots add nothing', async () => {
+  const w = world()
+  const reg = readJson(w.registryFile)
+  reg.roots = { [join(w.root, 'repos')]: 'work' }
+  writeJson(w.registryFile, reg)
+  const report = await run(w)
+  const c = byId(report, 'boundary')
+  assert.equal(c.status, 'fail')
+  for (const part of [w.repo, join(w.root, 'repos'), 'personal', 'work']) assert.ok(c.detail.includes(part), c.detail)
+  assert.equal(c.fix, `dial unregister katipon, then dial register ${w.repo} --vault work --host github`)
+  assert.equal(report.ok, false)
+
+  reg.roots = { [join(w.root, 'repos')]: 'personal' }
+  writeJson(w.registryFile, reg)
+  assert.equal(byId(await run(w), 'boundary').status, 'ok')
 })

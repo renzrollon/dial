@@ -1,0 +1,11 @@
+{
+  "name": "dial",
+  "owner": { "name": "Carl Rollon" },
+  "plugins": [
+    {
+      "name": "dial",
+      "source": { "source": "github", "repo": "renzrollon/dial" },
+      "description": "Session brief, session record and handoff for the Dial vault ledger."
+    }
+  ]
+}

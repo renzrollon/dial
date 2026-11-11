@@ -1,0 +1,226 @@
+{
+  "now": "2026-11-10T09:00:00Z",
+  "limits": {
+    "staleDays": 14,
+    "archivedKeepDays": 30
+  },
+  "facts": {
+    "repo": {
+      "name": "katipon",
+      "path": "/repos/katipon",
+      "realPath": "/repos/katipon",
+      "vault": "personal",
+      "host": "github"
+    },
+    "git": {
+      "branch": {
+        "value": "feat/add-login",
+        "evidence": "git rev-parse --abbrev-ref HEAD: feat/add-login"
+      },
+      "detached": {
+        "value": false,
+        "evidence": "git rev-parse --abbrev-ref HEAD: not HEAD"
+      },
+      "dirty": {
+        "value": 0,
+        "evidence": "git status --porcelain=v2: 0 entries"
+      },
+      "ahead": {
+        "value": 0,
+        "evidence": "git status --porcelain=v2 --branch: +0"
+      },
+      "behind": {
+        "value": 0,
+        "evidence": "git status --porcelain=v2 --branch: -0"
+      },
+      "stash": {
+        "value": 0,
+        "evidence": "git stash list: 0 entries"
+      },
+      "inProgress": {
+        "value": "none",
+        "evidence": ".git/rebase-merge: absent"
+      },
+      "unmerged": {
+        "value": [],
+        "evidence": "git status --porcelain=v2: no unmerged files"
+      },
+      "worktrees": {
+        "value": [
+          {
+            "path": "/repos/katipon",
+            "branch": "feat/add-login"
+          }
+        ],
+        "evidence": "git worktree list --porcelain: 1 worktree"
+      },
+      "lastCommit": {
+        "value": {
+          "sha7": "3f50683",
+          "head": "3f50683a1b2c3d4e5f60718293a4b5c6d7e8f901",
+          "date": "2026-11-09T18:00:00Z"
+        },
+        "evidence": "git log -1: 3f50683 2026-11-09T18:00:00Z"
+      }
+    },
+    "openspec": {
+      "active": {
+        "value": [
+          "add-login"
+        ],
+        "evidence": "openspec/changes: add-login"
+      },
+      "archived": {
+        "value": [],
+        "evidence": "openspec/changes/archive: none"
+      },
+      "changes": {
+        "add-login": {
+          "tasks": {
+            "value": {
+              "done": 2,
+              "total": 5
+            },
+            "evidence": "openspec/changes/add-login/tasks.md: 2/5"
+          },
+          "manualTest": {
+            "value": "absent",
+            "evidence": "openspec/changes/add-login/manual-test-plan.md: absent"
+          },
+          "needsHuman": {
+            "value": [],
+            "evidence": "openspec/changes/add-login/decisions.md: no needs_human rows"
+          },
+          "checkpoint": {
+            "value": "absent",
+            "evidence": "openspec/changes/add-login/checkpoint.json: absent"
+          },
+          "lastMtime": {
+            "value": "2026-11-09T12:00:00Z",
+            "evidence": "openspec/changes/add-login: newest mtime 2026-11-09T12:00:00Z"
+          }
+        }
+      }
+    },
+    "interlock": {
+      "run": {
+        "value": "absent",
+        "evidence": ".claude/ship/run.json: absent"
+      },
+      "stages": {
+        "add-login": {
+          "value": "absent",
+          "evidence": ".claude/ship/add-login/stage.json: absent"
+        }
+      },
+      "waves": {
+        "value": "absent",
+        "evidence": ".claude/ship/add-login/state.json: absent"
+      },
+      "terminal": {
+        "value": "none",
+        "evidence": ".claude/ship/runs: no trajectory"
+      },
+      "interrupted": {
+        "value": [],
+        "evidence": ".claude/ship/interrupted: absent"
+      },
+      "merge": {
+        "value": "absent",
+        "evidence": ".claude/ship/merge-confidence.json: absent"
+      },
+      "outcomes": {
+        "add-login": {
+          "value": "absent",
+          "evidence": ".claude/learning/outcomes.jsonl: absent"
+        }
+      },
+      "settle": {
+        "value": "absent",
+        "evidence": ".claude/ship/settle: absent"
+      },
+      "reviewArtifacts": {
+        "add-login": {
+          "value": "absent",
+          "evidence": ".claude/metrics/review-artifacts-add-login-*.json: absent"
+        }
+      },
+      "resumeCards": {
+        "add-login": {
+          "value": "absent",
+          "evidence": ".claude/handoff/ship-add-login-*.md: absent"
+        }
+      },
+      "trajectoryTs": {
+        "add-login": {
+          "value": "absent",
+          "evidence": ".claude/ship/runs: no trajectory"
+        }
+      },
+      "drift": {
+        "value": {
+          "unarchived": [],
+          "broken": {
+            "value": 0,
+            "evidence": "interlock drift --json: stale.broken 0"
+          },
+          "aging": {
+            "value": 0,
+            "evidence": "interlock drift --json: stale.aging 0"
+          }
+        },
+        "evidence": "interlock drift --json: ok"
+      }
+    },
+    "escapement": {
+      "entries": {
+        "add-login": {
+          "value": "absent",
+          "evidence": "~/.escapement/queue: no entry for add-login"
+        }
+      }
+    },
+    "sessions": {
+      "lastSession": {
+        "value": {
+          "file": "/home/me/.claude/projects/-repos-katipon/9f2c4b1e.jsonl",
+          "mtime": "2026-11-09T17:00:00Z"
+        },
+        "evidence": "~/.claude/projects/-repos-katipon/9f2c4b1e.jsonl: mtime 2026-11-09T17:00:00Z"
+      }
+    },
+    "remote": {
+      "pr": {
+        "value": {
+          "number": 38,
+          "state": "open",
+          "url": "https://github.com/renzrollon/katipon/pull/38",
+          "conflicting": false,
+          "mergedAt": null,
+          "updatedAt": "2026-11-09T18:30:00Z"
+        },
+        "evidence": "gh pr view 38: OPEN"
+      },
+      "ci": {
+        "value": {
+          "value": "fail",
+          "failing": [
+            "lint"
+          ]
+        },
+        "evidence": "gh pr checks feat/add-login: fail (lint)"
+      },
+      "remote": {
+        "value": "ok",
+        "evidence": "remote cache: fetched 2026-11-10T08:00:00Z"
+      }
+    }
+  },
+  "notes": {},
+  "expect": {
+    "state": "ci-red",
+    "needsMe": true,
+    "suggested": "/interlock:fix-tests",
+    "evidence": "gh pr checks feat/add-login: fail (lint)"
+  }
+}

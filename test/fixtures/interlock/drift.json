@@ -1,0 +1,25 @@
+{
+  "root": ".",
+  "unarchived": [
+    {
+      "change": "add-login",
+      "tasks": 2,
+      "path": "openspec/changes/add-login"
+    }
+  ],
+  "stale": {
+    "skipped": false,
+    "reason": null,
+    "broken": [],
+    "aging": [],
+    "indexed": 1,
+    "graphBuiltAt": "2026-11-11T05:36:16.288Z"
+  },
+  "orphans": {
+    "skipped": true,
+    "reason": "no --changed file list was supplied",
+    "orphans": [],
+    "considered": 0
+  },
+  "hasFindings": true
+}

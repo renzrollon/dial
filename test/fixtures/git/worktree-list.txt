@@ -1,0 +1,8 @@
+worktree /Users/caro/IdeaProjects/katipon
+HEAD 3f50683c1e0000000000000000000000000000aa
+branch refs/heads/main
+
+worktree /Users/caro/IdeaProjects/katipon/.claude/worktrees/fix-a
+HEAD 4a1b0000000000000000000000000000000000bb
+branch refs/heads/fix-a
+

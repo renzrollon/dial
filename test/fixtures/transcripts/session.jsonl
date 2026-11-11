@@ -1,0 +1,12 @@
+{"type":"summary","summary":"x"}
+{"type":"user","timestamp":"2026-11-10T14:00:00.000Z","message":{"role":"user","content":"Add a login route"}}
+{"type":"user","isMeta":true,"timestamp":"2026-11-10T14:00:01.000Z","message":{"role":"user","content":"<system-reminder>meta</system-reminder>"}}
+{"type":"assistant","timestamp":"2026-11-10T14:00:02.000Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"thinking","thinking":"secret plan"}]}}
+{"type":"assistant","timestamp":"2026-11-10T14:00:03.000Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"I will start with the route."}]}}
+{"type":"assistant","timestamp":"2026-11-10T14:00:04.000Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"user","timestamp":"2026-11-10T14:00:05.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"lib bin"}]}}
+{"type":"assistant","timestamp":"2026-11-10T14:00:06.000Z","message":{"id":"msg_1","role":"assistant","content":[{"type":"text","text":"The route lives in lib/auth.mjs."}]}}
+{"type":"assistant","isSidechain":true,"timestamp":"2026-11-10T14:00:07.000Z","message":{"id":"msg_s","role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}
+{"type":"user","timestamp":"2026-11-10T14:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"Now add tests"},{"type":"text","text":"for the 401 case"}]}}
+{"type":"assistant","timestamp":"2026-11-10T14:01:05.000Z","message":{"id":"msg_2","role":"assistant","content":[{"type":"text","text":"Tests added; two pass."}]}}
+not json
