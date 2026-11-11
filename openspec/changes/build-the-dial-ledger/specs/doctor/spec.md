@@ -2,11 +2,26 @@
 
 ## MODIFIED Requirements
 
+### Requirement: Every check is a record with a status, detail and evidence
+Each check SHALL produce a record with `id`, `status` (one of `ok`, `warn`, `fail`, `skip`), a one-line `detail`, an `evidence` array of strings, and an optional `fix` string. A check that throws SHALL be reported with the detail `check could not run: <message>`, and doctor SHALL still report every other check. The status of a throwing check SHALL be `fail` for the six precondition and boundary checks `node`, `home`, `registry`, `obsidian-cli`, `boundary` and `permissions`, and `skip` for the six advisory checks `vault-scaffold`, `vault-nesting`, `narrate-endpoint`, `launch-agent`, `on-path` and `fields`, which never fail.
+
+#### Scenario: Record shape in JSON
+- **WHEN** `dial doctor --json` is run
+- **THEN** every element of `checks` has `id`, `status`, `detail` and `evidence`, and `status` is one of the four values
+
+#### Scenario: A throwing check does not stop the report
+- **WHEN** one precondition check throws
+- **THEN** its record has status `fail` and a detail starting `check could not run:`, and the remaining checks still appear
+
+#### Scenario: A throwing advisory check is a skip
+- **WHEN** the `on-path` check throws because the PATH directories cannot be read
+- **THEN** its record has status `skip` and a detail starting `check could not run:`, the remaining checks still appear, and the exit code is not changed by it
+
 ### Requirement: The report has a header and exits 1 only on a failing check
 The text report SHALL begin with `DIAL OK — <n> passed` when no check failed, or `DIAL BLOCKED — <n> failing check(s)` otherwise, appending `, <n> warning(s)` when any check warned, then a line `  home: <path>`. `<n> passed` SHALL equal `counts.ok`; a `skip` does not count. The exit code SHALL be 1 when any check is `fail` and 0 otherwise. JSON SHALL carry `ok`, `home`, `counts`, `checks`, `failures` and `warnings`.
 
 #### Scenario: All green
-- **WHEN** doctor runs its twelve checks on a machine where `obsidian` is not on PATH (`obsidian-cli` is `skip`), every registered vault is scaffolded and none is nested, a narrate endpoint resolves, the LaunchAgent is `running`, `dial` is on PATH and `Bash(dial:*)` is allowed, so the other eleven checks are `ok` and none warns or fails
+- **WHEN** doctor runs its twelve checks on a machine where `obsidian` is not on PATH (`obsidian-cli` is `skip`), every registered vault is scaffolded and none is nested, a narrate endpoint resolves, the LaunchAgent is `running` or `idle`, `dial` is on PATH and `Bash(dial:*)` is allowed, so the other eleven checks are `ok` and none warns or fails
 - **THEN** the first line is `DIAL OK — 11 passed`, `counts.ok` is 11, and the exit code is 0
 
 #### Scenario: Warnings only
@@ -100,7 +115,7 @@ The `narrate-endpoint` check SHALL resolve the narrate endpoint the way `dial na
 - **THEN** the check is `ok` and doctor opens no network connection
 
 ### Requirement: The launch-agent check reports the LaunchAgent status
-The `launch-agent` check SHALL read the status `dial agent status` reports for `com.dial.sync`, using `DIAL_LAUNCHCTL_BIN` when set: `running` is `ok`, `not-installed` is `skip`, and `loaded-not-running`, `not-loaded` and `paths-missing` are `warn` with the status as the detail and the same fix `dial agent status` prints for that outcome. It SHALL NOT install, load or kick the agent.
+The `launch-agent` check SHALL read the status `dial agent status` reports for `com.dial.sync`, using `DIAL_LAUNCHCTL_BIN` when set: `running` and `idle` are `ok`, `not-installed` is `skip`, and `loaded-not-running`, `not-loaded` and `paths-missing` are `warn` with the status as the detail and the same fix `dial agent status` prints for that outcome. It SHALL NOT install, load or kick the agent.
 
 #### Scenario: Agent running
 - **WHEN** the plist exists and `launchctl print` reports `state = running` with a pid
@@ -111,7 +126,7 @@ The `launch-agent` check SHALL read the status `dial agent status` reports for `
 - **THEN** the `launch-agent` check is `skip` and the exit code is unaffected
 
 #### Scenario: Agent loaded but not running
-- **WHEN** the plist exists and `launchctl print` reports a state other than running and no pid
+- **WHEN** the plist exists and `launchctl print` reports a state other than running, no pid and no `last exit code = 0`
 - **THEN** the check is `warn` with the detail `loaded-not-running` and the fix `launchctl kickstart -k gui/<uid>/com.dial.sync`
 
 #### Scenario: Node binary moved
@@ -130,11 +145,11 @@ The `on-path` check SHALL be `ok` with the resolved path as evidence when an exe
 - **THEN** the `on-path` check is `warn`, its fix is `npm i -g .`, and the exit code is 0 if nothing else fails
 
 ### Requirement: The fields check lists every frontmatter key Dial writes
-The `fields` check SHALL always be `ok` with the detail `frontmatter keys dial writes into a vault (listed in --json evidence)` and one evidence line per note kind, `<kind>: <key>, <key>, …`, naming every frontmatter key Dial writes into that kind of note, then one line naming the generated body sections and what they carry, so an owner can see exactly what leaves a repository. It SHALL read no repository and no vault.
+The `fields` check SHALL always be `ok` with the detail `frontmatter keys dial writes into a vault (listed in --json evidence)` and one evidence line per note kind, `<kind>: <key>, <key>, …`, naming every frontmatter key Dial writes into that kind of note (the change and repo lines built from the renderers' own key lists, so they cannot drift from what is written), then one line naming the generated body sections and what they carry, so an owner can see exactly what leaves a repository. It SHALL read no repository and no vault.
 
 #### Scenario: Evidence names every key
 - **WHEN** `dial doctor --json` is run
-- **THEN** the `fields` check is `ok` and its evidence is exactly the six lines `change note: title, type, repo, change, scope, state, needs_me, stale, branch, pr, pr_state, ci, merge_verdict, tasks_done, tasks_total, last_commit, last_session, last_activity, created, updated, status, tags, aliases, dial_schema, dropped, archived`, `repo note: title, type, repo, scope, state, needs_me, stale, branch, dirty, stash, ahead, behind, worktrees, last_commit, last_session, last_activity, active_changes, created, updated, status, tags, aliases, dial_schema`, `summary note: type, tags, dial_schema`, `daily note: type, updated`, `review note: title, created, updated, type, status, tags, dial_schema` and `body sections: ## State (fact, value, evidence: repository-relative file paths, commands run, PR and pipeline URLs, check names, run ids), ## Changes, ## Drift (counts), ## Recent narrative (narrative text), daily log lines`
+- **THEN** the `fields` check is `ok` and its evidence is exactly the six lines `change note: title, type, repo, change, scope, state, needs_me, stale, branch, pr, pr_state, ci, merge_verdict, tasks_done, tasks_total, last_commit, last_session, last_activity, created, updated, status, tags, aliases, dial_schema, dropped, archived`, `repo note: title, type, repo, scope, state, needs_me, stale, branch, dirty, stash, ahead, behind, worktrees, last_commit, last_session, last_activity, active_changes, created, updated, status, tags, aliases, dial_schema, archived`, `summary note: type, tags, dial_schema`, `daily note: type, updated`, `review note: title, created, updated, type, status, tags, dial_schema` and `body sections: ## State (fact, value, evidence: repository-relative file paths, commands run, PR and pipeline URLs, check names, run ids), ## Changes, ## Drift (counts), ## Recent narrative (narrative text), daily log lines`
 
 #### Scenario: Fields never warns
 - **WHEN** no registry file exists and no vault is registered

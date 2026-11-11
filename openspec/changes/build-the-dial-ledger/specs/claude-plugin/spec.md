@@ -73,11 +73,19 @@ A hook script that acts SHALL run the CLI as `process.execPath` with `<plugin ro
 - **THEN** the brief is still produced, by `<plugin root>/bin/dial.mjs`
 
 ### Requirement: Hooks never block a session
-Every hook script SHALL wrap its work in one top-level guard, exit 0 on every path, write nothing to stdout except the SessionStart envelope, and on any failure (an exception, or the CLI exiting non-zero) write exactly one stderr line `dial <hook> hook error (ignored): <message>`, where `<hook>` is `brief`, `record` or `sync-on-event`.
+Every hook script SHALL wrap its work in one top-level guard, exit 0 on every path, write nothing to stdout except the SessionStart envelope, and on any failure (an exception, the CLI exiting non-zero, or the CLI run by the record or sync-on-event hook exiting 0 with a stderr line, which is how `dial record` reports its failure) write exactly one stderr line `dial <hook> hook error (ignored): <message>`, where `<hook>` is `brief`, `record` or `sync-on-event` and `<message>` is the CLI's stderr (its first line when it exited 0). A hook SHALL end by setting the exit code and letting stdout drain, never by a hard exit that can cut the SessionStart envelope short.
 
 #### Scenario: CLI fails under record
 - **WHEN** the CLI run by the record hook exits 1 with the stderr line `dial: boom`
 - **THEN** the record hook writes exactly one stderr line `dial record hook error (ignored): dial: boom` and exits 0
+
+#### Scenario: Record fails with exit 0 under the hook
+- **WHEN** the real `dial record --event SessionEnd` run by the record hook exits 0 with the stderr line `dial: vault personal for katipon does not exist: <path>`
+- **THEN** the record hook writes exactly one stderr line `dial record hook error (ignored): dial: vault personal for katipon does not exist: <path>` and exits 0
+
+#### Scenario: A large envelope reaches Claude Code whole
+- **WHEN** the SessionStart hook relays an envelope longer than 64 KiB through a pipe
+- **THEN** every byte of it is on the hook's stdout
 
 #### Scenario: Exception inside the hook
 - **WHEN** the sync-on-event hook throws `boom`

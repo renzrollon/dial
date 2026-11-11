@@ -53,6 +53,9 @@ export function runHook(name, { gate = () => true, plan, timeoutMs }) {
     })
     if (result.error) throw result.error
     if (result.status !== 0) throw new Error(oneLine(result.stderr) || `dial exited ${result.status}`)
+    // `dial record` reports its failure as one stderr line with exit 0, so a non-relay hook surfaces that line too.
+    const said = String(result.stderr ?? '').split('\n').map(l => l.trim()).find(Boolean)
+    if (!step.relay && said) throw new Error(said)
     if (step.relay) {
       const text = String(result.stdout ?? '').trim()
       if (!text) return
@@ -73,8 +76,11 @@ export function runHook(name, { gate = () => true, plan, timeoutMs }) {
   }
 }
 
-/** Exit 0 once stdout has drained, whatever happened. */
+/**
+ * Exit 0 whatever happened. Only the exit code is set: every hook path is synchronous, so the process ends
+ * when the event loop drains, after piped stdout (asynchronous on darwin) has been flushed. `process.exit`
+ * here would cut a large SessionStart envelope at the pipe buffer.
+ */
 export function finish() {
   process.exitCode = 0
-  process.exit(0)
 }

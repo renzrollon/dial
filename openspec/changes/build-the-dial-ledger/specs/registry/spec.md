@@ -33,6 +33,25 @@ The registry SHALL live at `<home>/registry.json` and be a JSON object with `dia
 - **WHEN** the file holds a `narrate` block and `dial register` adds a repo
 - **THEN** the rewritten file holds the same `narrate` object with the same keys and values, and `dial_schema` is still `dial.registry/1`
 
+### Requirement: Entries are validated on every load
+Each repo entry SHALL name a `vault` that exists under `vaults` and a `host` that is `github` or `gitlab`. Two entries SHALL NOT share a path, and two entries SHALL NOT share a repo name. Repo names SHALL be compared as the note filenames use them, after the sanitising that replaces `: / \ ? * " < > | # ^ [ ]` with `-`, because notes and the remote cache are keyed by that form. A violation SHALL be refused on load with a reason naming the offending entry, and `dial register` SHALL refuse a path whose sanitised name is already registered under another path.
+
+#### Scenario: Entry names an unknown vault
+- **WHEN** an entry's `vault` is `clients` and `vaults` has no `clients` key
+- **THEN** reading commands exit 1 with a reason naming the repo path and `clients`
+
+#### Scenario: Entry has an unknown host
+- **WHEN** an entry's `host` is `bitbucket`
+- **THEN** reading commands exit 1 with a reason naming the repo path and listing `github` and `gitlab` as the allowed values
+
+#### Scenario: Two entries share a name
+- **WHEN** two entries' paths both end in `/katipon`
+- **THEN** reading commands exit 1 with a reason naming both paths
+
+#### Scenario: Two names that sanitise alike
+- **WHEN** one entry's path ends in `/a#b` and another's in `/a-b`
+- **THEN** reading commands exit 1 with `two repos are named a-b` and both paths, and `dial register <dir>/a-b` beside a registered `<dir>/a#b` is refused with the registry unchanged
+
 ## ADDED Requirements
 
 ### Requirement: The narrate block is validated on every load

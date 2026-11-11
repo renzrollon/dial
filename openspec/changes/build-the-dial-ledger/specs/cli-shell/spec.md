@@ -40,6 +40,29 @@ Every command that reads or reports state — `version`, `limits`, `repos`, `doc
 - **WHEN** `dial watch --json` or `dial agent install --json` is run
 - **THEN** stdout is empty, stderr is `dial: unknown option: --json`, and the exit code is 1
 
+### Requirement: Every failure is one reason line on stderr
+When a command fails, the binary SHALL exit 1 and write exactly one line to stderr of the form `dial: <reason>`, where the reason is lowercase prose that quotes values, names, paths, operating-system messages and exception messages exactly as written, with no stack trace. Success output SHALL go to stdout only. An unexpected exception SHALL be reported the same way, using the exception message as the reason. A command that fails for several items at once (several repos under `sync --all`, several vaults under `review --week`) SHALL fold them into that one line and keep the per-item detail in `--json`. A `dial: <path> changed during the write; skipped` warning, written while a command goes on, is not the failure line. The one exception is `record`, which runs from a hook: once its command line has been parsed, every failure of `record` SHALL write the one `dial: <reason>` line and exit 0. A command line the parser refuses (an unknown option, a value option without a value) exits 1 for `record` as for every other command.
+
+#### Scenario: Failure writes one stderr line
+- **WHEN** any command other than `record` fails for a known reason
+- **THEN** stderr contains exactly one line starting with `dial: ` and the exit code is 1
+
+#### Scenario: Unexpected exception
+- **WHEN** a command throws an error the binary did not anticipate
+- **THEN** stderr is `dial: <error message>` with no stack trace, and the exit code is 1
+
+#### Scenario: Record fails with exit 0
+- **WHEN** `dial record --event Stop` is run, or `dial record --event SessionEnd` is run against a vault that does not exist
+- **THEN** stderr is exactly one `dial: <reason>` line and the exit code is 0
+
+#### Scenario: Record refuses an unknown option with exit 1
+- **WHEN** `dial record --event SessionEnd --bogus` is run
+- **THEN** stderr is exactly `dial: unknown option: --bogus` and the exit code is 1
+
+#### Scenario: Several failed vaults are one line
+- **WHEN** `dial review --week` is run and two of three vaults cannot be written
+- **THEN** stderr is exactly one line `dial: 2 of 3 vaults not reviewed: <first reason>` and the exit code is 1
+
 ## ADDED Requirements
 
 ### Requirement: The vault and agent commands dispatch on a subcommand

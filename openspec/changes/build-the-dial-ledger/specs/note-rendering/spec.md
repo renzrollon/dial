@@ -69,7 +69,7 @@ After the frontmatter a change note SHALL hold `## Next`, then `## Narrative`, t
 - **THEN** the cell carries `\|` and the table keeps three columns
 
 ### Requirement: Human-owned content and unknown keys survive every render
-A re-render SHALL copy `## Next`, `## Narrative` and every human-added section byte for byte, SHALL keep every frontmatter key Dial does not own as written, after Dial's keys in their original order, SHALL keep `created`, `dropped` and `archived` once written Rendering twice from the same facts SHALL yield identical bytes.
+A re-render SHALL copy `## Next`, `## Narrative` and every human-added section byte for byte, SHALL keep every frontmatter key Dial does not own as written, after Dial's keys in their original order, SHALL keep `created`, `dropped` and `archived` once written Rendering twice from the same facts SHALL yield identical bytes. A note with CRLF line endings SHALL be read the same way: its `---\r\n` block is its frontmatter, so a render, `dial drop` or an archive move edits that block in place and never adds a second one.
 
 #### Scenario: Edited Next and Narrative survive
 - **WHEN** a human rewrites two `## Next` lines and adds a paragraph to `## Narrative`, then `dial sync` runs
@@ -78,6 +78,10 @@ A re-render SHALL copy `## Next`, `## Narrative` and every human-added section b
 #### Scenario: Unknown keys survive
 - **WHEN** the note's frontmatter holds `source: meeting` and `aliases: [login work]`
 - **THEN** after a render `source: meeting` is still present and `aliases` is still `[login work]`
+
+#### Scenario: A CRLF note keeps one frontmatter block
+- **WHEN** `Changes/katipon--add-login.md` was saved with CRLF line endings and `dial drop katipon add-login` runs
+- **THEN** the note holds exactly one frontmatter block, with `state: dropped`, its `repo` key kept, and its other lines still ending in CRLF
 
 ### Requirement: updated changes only when the file does
 Dial SHALL decide `updated` by rendering the note with its existing `updated` value. When those bytes equal the file on disk the file SHALL NOT be written; otherwise `updated` SHALL be set to today and the note rendered again.
@@ -241,7 +245,11 @@ A fact Dial could not observe SHALL be written as the bare value `unobserved` in
 - **THEN** `branch`, `dirty`, `stash`, `ahead`, `behind` and `last_commit` in the repo note are each `unobserved`, not `0` or empty
 
 ### Requirement: Written files carry metadata only
-Dial SHALL NOT write a diff, a file's contents, a token, an environment variable's value or an API key into any vault file. Before writing, every fact value, evidence string and narrative entry Dial authors SHALL have each secret-looking string replaced by `[redacted]`: a word starting `ghp_`, `glpat-`, `sk-` or `AKIA`; `Bearer ` and the word after it; a word containing `password=` or `token=`; `export <NAME>=` and the rest of its word; a whole line containing `-----BEGIN` or `diff --git`.
+Dial SHALL NOT write a diff, a file's contents, a token, an environment variable's value or an API key into any vault file. Before writing, every fact value, evidence string and narrative entry Dial authors SHALL have each secret-looking string replaced by `[redacted]`: a word starting `ghp_`, `gho_`, `ghr_`, `ghs_`, `ghu_`, `github_pat_`, `glpat-`, `glptt-`, `gldt-`, `sk-`, `AKIA` or `xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-`; `Bearer ` and the word after it; an assignment, `=` or `:` form, bare or quoted, to a key whose name contains `password`, `passwd`, `secret`, `token`, `apikey`, `api_key`, `api-key` or ends `_key`/`-key` (in any letter case), with its value word; `export <NAME>=` and the rest of its word; a whole line containing `-----BEGIN` or `diff --git`.
+
+#### Scenario: Common token shapes are redacted
+- **WHEN** a narrative entry holds `github_pat_11ABC`, `gho_x`, `ghs_y`, `xoxb-1-2`, `AWS_SECRET_ACCESS_KEY: abc`, `"apiKey": "zz"` and `api_key=q`
+- **THEN** each of them is written as `[redacted]`
 
 #### Scenario: Planted strings never reach the vault
 - **WHEN** a fixture vault is synced from facts whose branch names and commit subjects contain `ghp_abc123`, `glpat-xyz`, `sk-live1`, `AKIAEXAMPLE`, `Bearer abc`, `password=hunter2`, `token=t0k`, `diff --git a/x b/x` and `export API_KEY=v`
@@ -253,7 +261,11 @@ Dial SHALL NOT write a diff, a file's contents, a token, an environment variable
 - **THEN** Dial copies that section byte for byte and does not redact it
 
 ### Requirement: Redaction matches whole words and never renames a note
-A redaction prefix SHALL match only at the start of a word: at the start of the text or after a character outside `[A-Za-z0-9_-]`. Repo and change names in filenames, wikilinks and the `repo`, `change` and `title` keys SHALL NOT be redacted, because a note's name must match its change.
+A redaction prefix SHALL match only at the start of a word: at the start of the text or after a character outside `[A-Za-z0-9_-]`. Repo and change names in filenames, wikilinks and the `repo`, `change` and `title` keys SHALL NOT be redacted, because a note's name must match its change. The patterns SHALL run on the text as written, and a match SHALL be left alone only when it consists of repo and change names and the separators `-`, `_`, `.` and `/` alone; a name that overlaps a pattern's trigger word SHALL NOT shield the secret beside it.
+
+#### Scenario: A change named like a trigger word does not shield a secret
+- **WHEN** a change is named `export` or `token` and its narrative holds `export AWS_SECRET_ACCESS_KEY=abcd1234` or `token=abc123secret`
+- **THEN** the written note holds `[redacted]` in their place and the change name is written unredacted elsewhere
 
 #### Scenario: Ordinary words are not redacted
 - **WHEN** a change is named `risk-model`

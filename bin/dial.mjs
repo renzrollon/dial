@@ -368,8 +368,19 @@ async function runWatch({ env, out, err, home, signal }) {
   if (signal) signal.aborted ? abort() : signal.addEventListener('abort', abort, { once: true })
   else process.once('SIGINT', abort)
   try {
+    // Each tick re-reads the registry, so an unregister or a vault move while watch runs takes effect at once.
+    const reload = () => {
+      try {
+        const loaded = loadRegistry(home)
+        if (!loaded.ok) return loaded
+        const lim = effectiveLimits(loaded.registry.limits, registryPath(home))
+        return lim.ok ? { ok: true, registry: loaded.registry, limits: lim.limits } : lim
+      } catch (err) {
+        return { ok: false, reason: err?.message ?? String(err) }
+      }
+    }
     await watch({
-      registry, pollMs: limits.watchPollSeconds * 1000, signal: controller.signal,
+      registry, reload, pollMs: limits.watchPollSeconds * 1000, signal: controller.signal,
       stdout: line => out(`${line}\n`), stderr: line => err(`${line}\n`),
       syncOpts: { limits, env, home, dueRemote: true, warn: line => err(`${line}\n`) },
     })
@@ -525,8 +536,10 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
         const lines = result.results.filter(r => r.verb !== 'failed').map(r => r.line)
         if (lines.length) out(`${lines.join('\n')}\n`)
       }
-      for (const r of result.results) if (r.verb === 'failed') err(`dial: ${r.reason}\n`)
-      return result.ok ? 0 : 1
+      // Every failed vault folds into the one reason line; the per-vault reasons stay in --json.
+      const failed = result.results.filter(r => r.verb === 'failed')
+      if (failed.length) throw new Refusal(`${failed.length} of ${result.results.length} vaults not reviewed: ${failed[0].reason}`)
+      return 0
     }
 
     case 'narrate':
@@ -568,7 +581,7 @@ export async function main(argv, {
     return code
   }
 
-  // `record` runs from a hook and exits 0 on every path, its failure being the one stderr line.
+  // `record` runs from a hook: once its command line is parsed it exits 0 on every path, its failure being the one stderr line.
   let failCode = 1
   try {
     if (argv.includes('--help')) {
@@ -586,9 +599,11 @@ export async function main(argv, {
       out(USAGE)
       return fail(`unknown command: ${command}`)
     }
-    failCode = command === 'record' ? 0 : 1
     const { sub, spec, rest: args } = selectSpec(command, rest)
-    return await dispatch(command, sub, spec, parseArgs(spec, args), { env, cwd, out, err, readStdin: stdin, fetch, signal })
+    const parsed = parseArgs(spec, args)
+    // A command line the parser refuses exits 1 for record too; only a failure of the run itself exits 0.
+    if (command === 'record') failCode = 0
+    return await dispatch(command, sub, spec, parsed, { env, cwd, out, err, readStdin: stdin, fetch, signal })
   } catch (error) {
     return fail(error && error.message ? error.message : String(error), failCode)
   }

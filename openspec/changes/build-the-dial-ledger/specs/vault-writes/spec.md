@@ -185,7 +185,7 @@ A daily line SHALL go into `Daily/YYYY-MM-DD.md` for the local date, created fro
 - **THEN** the new line becomes the third line of `## Log`, before `## Reading`, and the two earlier lines are unchanged
 
 ### Requirement: Archived change notes move to Archive/Changes after the keep period
-On every sync, a change note with `state: archived` whose OpenSpec archive date is more than `archivedKeepDays` days before today SHALL be moved to `Archive/Changes/<same name>.md` with `status: archived` and `archived: <today>` set and every other byte kept. When the target already exists the move SHALL be skipped and both files left unchanged.
+On every sync, a change note with `state: archived` whose OpenSpec archive date is more than `archivedKeepDays` days before today SHALL be moved to `Archive/Changes/<same name>.md` with `status: archived` and `archived: <today>` set and every other byte kept. When the target already exists the move SHALL be skipped and both files left unchanged. A change note whose change is in the OpenSpec archive but that derive no longer makes an item for, because the first sync after the archive came after the keep period, and whose `state` is neither `archived` nor `dropped`, SHALL first get `state: archived` and `needs_me: false` (and `stale: false` when it has a `stale` key), every other byte kept, and SHALL then be moved in the same sync.
 
 #### Scenario: Moved after the keep period
 - **WHEN** `add-login` was archived as `archive/2026-10-01-add-login/`, `archivedKeepDays` is 30 and today is 2026-11-10
@@ -194,6 +194,10 @@ On every sync, a change note with `state: archived` whose OpenSpec archive date 
 #### Scenario: Kept within the period
 - **WHEN** the change was archived on 2026-11-01 and today is 2026-11-10
 - **THEN** the note stays in `Changes/` with `state: archived`
+
+#### Scenario: An archive found after the keep period
+- **WHEN** `Changes/katipon--add-login.md` says `state: archive-pending` and `needs_me: true`, `add-login` was archived 35 days ago, `archivedKeepDays` is 30, and `dial sync katipon` runs for the first time since
+- **THEN** the note is at `Archive/Changes/katipon--add-login.md` with `state: archived`, `needs_me: false` and `status: archived`, and `Dial Summary.md` no longer lists it as needing me
 
 #### Scenario: Target already exists
 - **WHEN** `Archive/Changes/katipon--add-login.md` already exists

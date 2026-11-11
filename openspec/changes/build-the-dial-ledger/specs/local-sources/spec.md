@@ -34,7 +34,11 @@ Every value a local source reports SHALL be a fact: observed, with a value and o
 - **THEN** the checkpoint fact is observed with value `absent` and evidence `openspec/changes/<change>/checkpoint.json: absent`
 
 ### Requirement: Local subprocesses are optional, bounded and never touch the network
-Local sources SHALL run only `git` (in the repository) and, under `dial sync` only, `interlock drift --json`; each SHALL be killed after `subprocessTimeoutSeconds`. A binary not on PATH SHALL make its facts `unobserved: <bin>: not on PATH`, a timeout `unobserved: <bin>: timed out after <n>s`, and a non-zero exit `unobserved: <bin>: <first stderr line>`. No local source SHALL fetch, push, or open a network connection.
+Local sources SHALL run only `git` (in the repository) and, under `dial sync` only, `interlock drift --json`; each SHALL be killed after `subprocessTimeoutSeconds`. A binary not on PATH SHALL make its facts `unobserved: <bin>: not on PATH`, a timeout `unobserved: <bin>: timed out after <n>s`, and a non-zero exit `unobserved: <bin>: <first stderr line>`. No local source SHALL fetch, push, or open a network connection. Every `git` call SHALL run with `GIT_OPTIONAL_LOCKS=0` in its environment, so `git status` takes no `.git/index.lock` and a killed call leaves none behind.
+
+#### Scenario: git takes no optional lock
+- **WHEN** `dial sync katipon` runs `git status --porcelain=v2 --branch`
+- **THEN** that call's environment holds `GIT_OPTIONAL_LOCKS=0` and `.git/index.lock` is not created
 
 #### Scenario: git missing from PATH
 - **WHEN** `dial sync katipon` runs with a PATH that holds no `git`

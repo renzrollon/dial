@@ -7,7 +7,11 @@ How a change's narrative gets written: `dial handoff` records five lines a sessi
 ## ADDED Requirements
 
 ### Requirement: Handoff prepends a dated, labelled entry to the narrative
-`dial handoff <repo> [<change>]` SHALL insert one entry at the top of `## Narrative` in `Changes/<repo>--<change>.md`, or in `Projects/<repo>.md` when no change is given: the heading `### YYYY-MM-DD HH:mm · <source>` in local time (`DIAL_NOW` overrides the clock), the text with trailing whitespace trimmed, then one empty line. `<source>` SHALL be `--source` or the default `dial handoff`. Older entries SHALL stay byte for byte below it.
+`dial handoff <repo> [<change>]` SHALL insert one entry at the top of `## Narrative` in `Changes/<repo>--<change>.md`, or in `Projects/<repo>.md` when no change is given: the heading `### YYYY-MM-DD HH:mm · <source>` in local time (`DIAL_NOW` overrides the clock), the text with trailing whitespace trimmed, then one empty line. `<source>` SHALL be `--source` or the default `dial handoff`. Older entries SHALL stay byte for byte below it. The text SHALL NOT be able to change the note's structure: outside a fenced block, a body line starting `## ` or a dated `### YYYY-MM-DD HH:mm · ` heading SHALL be written one level down (`### `, `#### `), and an unclosed fence SHALL be closed at the end of the entry, so the next sync keeps the whole entry inside `## Narrative`. The same applies to an entry `narrate` writes.
+
+#### Scenario: A body with a section heading survives the next sync
+- **WHEN** `dial handoff katipon add-login --stdin` is given `Done: x` then `## State` then `Next: y`, and `dial sync katipon` runs afterwards
+- **THEN** the entry is written with the line `### State` and, after the sync, `## Narrative` still holds `Done: x`, `### State` and `Next: y`
 
 #### Scenario: Entry on a change note
 - **WHEN** `DIAL_NOW=2026-11-10T14:05:00Z dial handoff katipon add-login --text "Done: wired the form"` is run and `Changes/katipon--add-login.md` exists
@@ -237,11 +241,15 @@ The resolved API key SHALL be sent only as the `Authorization: Bearer <key>` hea
 - **THEN** stderr is `dial: record needs --event SessionEnd or PreCompact` and the exit code is 0
 
 ### Requirement: Record finishes within the hook timeout
-Record SHALL take a deadline of 55 seconds from its start, inside the hook's 60-second timeout. Each model call's timeout SHALL be the smaller of `narrateTimeoutSeconds` and the time left before the deadline minus 2 seconds; a call with less than 5 seconds left SHALL NOT be made and SHALL count as a failed attempt with the reason `no time left before the hook deadline`.
+Record SHALL take a deadline of 55 seconds from its start, inside the hook's 60-second timeout. Each model call's timeout SHALL be the smaller of `narrateTimeoutSeconds` and the time left before the deadline minus 2 seconds; a call with less than 5 seconds left SHALL NOT be made and SHALL count as a failed attempt with the reason `no time left before the hook deadline`. The deadline SHALL bound the sync too: each subprocess the sync runs SHALL be killed after the smaller of `subprocessTimeoutSeconds` and the time left before the deadline minus 2 seconds, and one that would start with no time left SHALL NOT start and SHALL count as timed out. Record SHALL take the attribution from the sync's own derived view and re-read only the notes, never collecting the repo a second time.
 
 #### Scenario: A slow primary leaves no time for the fallback
 - **WHEN** the sync takes 10 seconds, `narrateTimeoutSeconds` is 30, and the primary endpoint never answers
 - **THEN** the primary call is aborted after 30 seconds, the fallback call is bounded by the 13 seconds left before the deadline, and record exits 0 within 55 seconds of its start
+
+#### Scenario: Slow git cannot outlast the deadline
+- **WHEN** every `git` call hangs
+- **THEN** the sync's git calls are killed by the deadline, record runs no further git call after the sync, and record returns within 55 seconds of its start
 
 #### Scenario: No time left at all
 - **WHEN** the sync takes 52 seconds

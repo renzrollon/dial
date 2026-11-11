@@ -78,14 +78,18 @@ When `launchctl bootstrap` exits non-zero, install SHALL remove the plist it wro
 - **THEN** stdout is `not installed` and the exit code is 0
 
 ### Requirement: Status reports what launchd says
-`dial agent status` SHALL report `not-installed` (exit 1, fix `dial agent install`) when the plist is absent; `paths-missing` (exit 1, fix `dial agent install`) when a path recorded in the plist no longer exists; otherwise from `launchctl print gui/<uid>/com.dial.sync` (`state =`, `pid =`): `running` with the pid (exit 0), `loaded-not-running` (exit 1, fix `launchctl kickstart -k gui/<uid>/com.dial.sync`), or `not-loaded` when print fails (exit 1, fix `dial agent install`).
+`dial agent status` SHALL report `not-installed` (exit 1, fix `dial agent install`) when the plist is absent; `paths-missing` (exit 1, fix `dial agent install`) when a path recorded in the plist no longer exists; otherwise from `launchctl print gui/<uid>/com.dial.sync` (`state =`, `pid =`, `last exit code =`): `running` with the pid (exit 0); `idle` when the state is not running and the last exit code is `0` or `(never exited)`, which is the healthy state of the interval job between runs (exit 0, no fix); `loaded-not-running` when the state is not running and the last exit code is non-zero or not reported (exit 1, fix `launchctl kickstart -k gui/<uid>/com.dial.sync`); or `not-loaded` when print fails (exit 1, fix `dial agent install`).
 
 #### Scenario: Running
 - **WHEN** the plist exists and the fake launchctl prints `state = running` and `pid = 4242`
 - **THEN** stdout starts `agent: running (pid 4242)` and the exit code is 0
 
+#### Scenario: Idle between intervals
+- **WHEN** launchctl prints `state = not running`, no pid and `last exit code = 0`
+- **THEN** the outcome is `idle`, stdout starts `agent: idle`, no fix is printed, and the exit code is 0
+
 #### Scenario: Loaded, not running
-- **WHEN** launchctl prints `state = not running` and no pid
+- **WHEN** launchctl prints `state = not running`, no pid and no `last exit code = 0` line
 - **THEN** the outcome is `loaded-not-running`, stdout includes `fix: launchctl kickstart -k gui/<uid>/com.dial.sync`, and the exit code is 1
 
 #### Scenario: Not loaded
@@ -125,6 +129,10 @@ Every agent subcommand SHALL run the binary named by `DIAL_LAUNCHCTL_BIN` when i
 #### Scenario: First poll
 - **WHEN** `dial watch` starts
 - **THEN** the first poll records every repo's newest mtime and syncs nothing
+
+#### Scenario: The registry is read again every poll
+- **WHEN** `dial unregister katipon` runs while `dial watch` is running and a file under `katipon/.claude/ship/` is then modified
+- **THEN** watch syncs nothing for katipon and writes nothing into its old vault, a repo registered meanwhile is watched from the next poll, and a poll whose registry cannot be read writes one `dial: <reason>` stderr line and syncs nothing
 
 ### Requirement: Watch prints one line per sync and runs until interrupted
 Watch SHALL print one stdout line per sync it runs, `HH:mm synced <repo> (needs me <n>)`, keep polling when one sync fails (writing one stderr line `dial: <repo>: <reason>`), and exit 0 on SIGINT.
