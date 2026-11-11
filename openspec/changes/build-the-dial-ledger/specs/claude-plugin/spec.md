@@ -124,6 +124,13 @@ For a registered repo the SessionEnd and PreCompact hooks SHALL run `dial record
 ### Requirement: PostToolUse syncs after Interlock and OpenSpec close events
 The PostToolUse hook SHALL run `dial sync <repo>` only when `tool_input.command` matches `^\s*(interlock run close|interlock settle\b|openspec archive\b)`; any other payload SHALL exit 0 at once without starting a subprocess.
 
+### Requirement: The brief and sync-on-event hooks bound the CLI's subprocesses by a deadline
+The SessionStart hook SHALL run the CLI with `DIAL_DEADLINE_MS` set to `6000` under its 8-second kill, and the PostToolUse hook with `DIAL_DEADLINE_MS` set to `25000` under its 28-second kill. `dial sync` and `dial brief` SHALL read `DIAL_DEADLINE_MS` (a positive integer of milliseconds, measured from the CLI's start; blank or unset is no deadline, anything else is refused) and bound every subprocess they run by the smaller of `subprocessTimeoutSeconds` and the time left before the deadline minus 2 seconds; a subprocess that would start with no time left SHALL NOT start and SHALL count as timed out. The sync's writes therefore start before the hook's kill, and the kill never lands on a git or interlock child.
+
+#### Scenario: Slow git cannot outlast the sync-on-event hook
+- **WHEN** the PostToolUse hook runs `dial sync katipon` and every `git` call would hang
+- **THEN** each call is killed by the deadline, the sync writes its notes with the git facts unobserved, and the CLI exits before the hook's 28-second kill
+
 #### Scenario: Archive command
 - **WHEN** `tool_input.command` is `  openspec archive add-login --yes` in a registered repo
 - **THEN** the CLI runs `sync katipon` and the hook exits 0

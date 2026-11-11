@@ -15,7 +15,7 @@ import { effectiveLimits, formatLimits } from '../lib/limits.mjs'
 import { DEFAULT_SOURCE, handoff } from '../lib/handoff.mjs'
 import { evalSet, narrate } from '../lib/narrate.mjs'
 import { formatNext, nextItems } from '../lib/next.mjs'
-import { BAD_EVENT, parsePayload, record, RECORD_EVENTS } from '../lib/record.mjs'
+import { BAD_EVENT, boundedExec, parsePayload, record, RECORD_EVENTS } from '../lib/record.mjs'
 import {
   expandHome, listRepos, loadRegistry, register, registryPath, repoName, resolveRepo, unregister, writeRegistry,
 } from '../lib/registry.mjs'
@@ -56,7 +56,7 @@ Commands:
   review --week                write the weekly review of stale items into each vault (--json)
   help                         print this text (also --help after any command)
 
-Environment: DIAL_HOME (state directory, default ~/.config/dial), DIAL_NOW (ISO-8601 clock override with Z or an offset), DIAL_LAUNCHCTL_BIN (launchctl path), ESCAPEMENT_HOME (default ~/.escapement), ESCAPEMENT_CHECKPOINT_URL (appended to checkpoint evidence)
+Environment: DIAL_HOME (state directory, default ~/.config/dial), DIAL_NOW (ISO-8601 clock override with Z or an offset), DIAL_LAUNCHCTL_BIN (launchctl path), DIAL_DEADLINE_MS (sync and brief: end every subprocess this many ms after start, set by the hooks), ESCAPEMENT_HOME (default ~/.escapement), ESCAPEMENT_CHECKPOINT_URL (appended to checkpoint evidence)
 `
 
 /**
@@ -160,6 +160,18 @@ function clockOf(env) {
   return new Date(value)
 }
 
+/**
+ * The subprocess runner under `DIAL_DEADLINE_MS` (a positive integer of milliseconds from `started`), or
+ * undefined (the default runner) when it is unset or blank. The hooks set it below their kill, so every git and
+ * interlock child ends, and the writes start, before the hook's timeout fires.
+ */
+function deadlineExec(env, started) {
+  const raw = typeof env.DIAL_DEADLINE_MS === 'string' ? env.DIAL_DEADLINE_MS.trim() : ''
+  if (!raw) return undefined
+  if (!/^\d+$/.test(raw) || Number(raw) < 1) throw new Refusal(`DIAL_DEADLINE_MS is not a positive integer: ${env.DIAL_DEADLINE_MS}`)
+  return boundedExec({ clock: Date.now, deadline: started + Number(raw) })
+}
+
 function loadOrRefuse(home) {
   const loaded = loadRegistry(home)
   if (!loaded.ok) throw new Refusal(loaded.reason)
@@ -234,17 +246,18 @@ function summaryLines(summary) {
   return summary.line ? [summary.line] : []
 }
 
-function runSync({ options, positionals }, { env, cwd, out, err, home }) {
+function runSync({ options, positionals }, { env, cwd, out, err, home, started }) {
   const [arg] = positionals
   if (arg === undefined && !options.all) throw new Refusal('sync needs <repo> or --all')
   if (arg !== undefined && options.all) throw new Refusal('sync takes <repo> or --all, not both')
   const now = clockOf(env)
+  const exec = deadlineExec(env, started)
   const registry = loadForWrite(home)
   const limits = limitsOrRefuse(registry, home)
   const shared = {
     registry, limits, env, home, now,
     remote: !!options.remote, dueRemote: !!options['due-remote'], dryRun: !!options['dry-run'],
-    warn: line => err(`${line}\n`),
+    warn: line => err(`${line}\n`), ...(exec ? { exec } : {}),
   }
 
   if (!options.all) {
@@ -252,18 +265,21 @@ function runSync({ options, positionals }, { env, cwd, out, err, home }) {
     const result = syncRepo({ ...shared, repo: entry ? entry.name : arg })
     if (!result.ok) throw new Refusal(result.reason)
     const lines = syncLines(result)
-    const summary = summaryLines(result.summary)
-    if (result.dryRun) lines.push(...summary)
+    if (result.dryRun && result.summary.ok) lines.push(...summaryLines(result.summary))
     out(options.json ? json([syncRow(result)]) : `${lines.join('\n')}\n`)
+    // The repo's writes have landed; a summary that failed after them is still the run's failure.
+    summaryLines(result.summary)
     return 0
   }
 
   const all = syncAll(shared)
   if (!all.ok) throw new Refusal(all.reason)
   const lines = all.results.flatMap(syncLines)
-  for (const summary of all.summaries) lines.push(...summaryLines(summary))
+  for (const summary of all.summaries) if (summary.ok) lines.push(...summaryLines(summary))
   if (options.json) out(json(all.results.map(syncRow)))
   else if (lines.length) out(`${lines.join('\n')}\n`)
+  // The per-repo lines are printed first, so a summary that failed after the repos' writes loses none of them.
+  for (const summary of all.summaries) summaryLines(summary)
   if (all.failed) throw new Refusal(`${all.failed} of ${all.total} repos not synced`)
   return 0
 }
@@ -390,7 +406,7 @@ async function runWatch({ env, out, err, home, signal }) {
   return 0
 }
 
-async function dispatch(command, sub, spec, { options, positionals }, { env, cwd, out, err, readStdin, fetch, signal }) {
+async function dispatch(command, sub, spec, { options, positionals }, { env, cwd, out, err, readStdin, fetch, signal, started }) {
   if (positionals.length > spec.args) throw new Refusal(`unexpected argument: ${positionals[spec.args]}`)
   const home = resolveHome(env)
 
@@ -458,7 +474,7 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
     }
 
     case 'sync':
-      return runSync({ options, positionals }, { env, cwd, out, err, home })
+      return runSync({ options, positionals }, { env, cwd, out, err, home, started })
 
     case 'next': {
       const now = clockOf(env)
@@ -481,7 +497,8 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
         if (options.hook) return 0
         throw new Refusal(`${arg} is not a registered repo`)
       }
-      const result = brief({ registry, arg: entry.name, limits, env, now, home, session: options.session ?? null })
+      const exec = deadlineExec(env, started)
+      const result = brief({ registry, arg: entry.name, limits, env, now, home, session: options.session ?? null, ...(exec ? { exec } : {}) })
       if (!result.ok) {
         if (options.hook) return 0
         throw new Refusal(result.reason)
@@ -574,6 +591,7 @@ export async function main(argv, {
   env = process.env, cwd = process.cwd(), stdout = process.stdout, stderr = process.stderr, stdin = readProcessStdin,
   fetch = globalThis.fetch, signal,
 } = {}) {
+  const started = Date.now()
   const out = text => stdout.write(text)
   const err = text => stderr.write(text)
   const fail = (reason, code = 1) => {
@@ -603,7 +621,7 @@ export async function main(argv, {
     const parsed = parseArgs(spec, args)
     // A command line the parser refuses exits 1 for record too; only a failure of the run itself exits 0.
     if (command === 'record') failCode = 0
-    return await dispatch(command, sub, spec, parsed, { env, cwd, out, err, readStdin: stdin, fetch, signal })
+    return await dispatch(command, sub, spec, parsed, { env, cwd, out, err, readStdin: stdin, fetch, signal, started })
   } catch (error) {
     return fail(error && error.message ? error.message : String(error), failCode)
   }

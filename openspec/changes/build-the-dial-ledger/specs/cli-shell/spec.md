@@ -3,7 +3,7 @@
 ## MODIFIED Requirements
 
 ### Requirement: Usage is printed on request and never as an error
-The binary SHALL print its usage text to stdout and exit 0 when invoked with no command, with the command `help`, or with `--help` anywhere on the command line. The usage text SHALL start with the line `dial — ` followed by a one-line tagline, list every command with a one-line description, and end with an `Environment:` line naming every Dial-specific environment variable the binary reads: `DIAL_HOME`, `DIAL_NOW`, `DIAL_LAUNCHCTL_BIN`, `ESCAPEMENT_HOME` and `ESCAPEMENT_CHECKPOINT_URL`.
+The binary SHALL print its usage text to stdout and exit 0 when invoked with no command, with the command `help`, or with `--help` anywhere on the command line. The usage text SHALL start with the line `dial — ` followed by a one-line tagline, list every command with a one-line description, and end with an `Environment:` line naming every Dial-specific environment variable the binary reads: `DIAL_HOME`, `DIAL_NOW`, `DIAL_LAUNCHCTL_BIN`, `DIAL_DEADLINE_MS`, `ESCAPEMENT_HOME` and `ESCAPEMENT_CHECKPOINT_URL`.
 
 #### Scenario: Bare invocation
 - **WHEN** `dial` is run with no arguments
@@ -15,7 +15,7 @@ The binary SHALL print its usage text to stdout and exit 0 when invoked with no 
 
 #### Scenario: Usage names every command and environment variable
 - **WHEN** usage is printed
-- **THEN** it contains one line for each of the nineteen commands `version`, `limits`, `doctor`, `register`, `unregister`, `repos`, `help`, `vault`, `sync`, `next`, `brief`, `handoff`, `narrate`, `record`, `drop`, `agent`, `watch`, `report` and `review`, and its `Environment:` line names `DIAL_HOME`, `DIAL_NOW`, `DIAL_LAUNCHCTL_BIN`, `ESCAPEMENT_HOME` and `ESCAPEMENT_CHECKPOINT_URL`
+- **THEN** it contains one line for each of the nineteen commands `version`, `limits`, `doctor`, `register`, `unregister`, `repos`, `help`, `vault`, `sync`, `next`, `brief`, `handoff`, `narrate`, `record`, `drop`, `agent`, `watch`, `report` and `review`, and its `Environment:` line names `DIAL_HOME`, `DIAL_NOW`, `DIAL_LAUNCHCTL_BIN`, `DIAL_DEADLINE_MS`, `ESCAPEMENT_HOME` and `ESCAPEMENT_CHECKPOINT_URL`
 
 #### Scenario: Usage names the subcommands
 - **WHEN** usage is printed

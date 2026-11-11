@@ -6,6 +6,8 @@ const CLOSE_COMMAND = /^\s*(interlock run close|interlock settle\b|openspec arch
 
 runHook('sync-on-event', {
   timeoutMs: 28_000,
+  // Every git and interlock child of the sync ends by 23 s, so its writes finish before the 28 s kill.
+  deadlineMs: 25_000,
   gate: payload => typeof payload.tool_input?.command === 'string' && CLOSE_COMMAND.test(payload.tool_input.command),
   plan: ({ entry }) => ({ args: ['sync', entry.name] }),
 })

@@ -135,6 +135,10 @@ The primary endpoint SHALL come from `~/.pi/agent/models.json`: the provider nam
 - **WHEN** the resolved URL's host is not `127.0.0.1`, `localhost` or `::1`
 - **THEN** that endpoint is not called and counts as a failed attempt with the reason `<url> is not a local endpoint`
 
+#### Scenario: A redirect from a local endpoint is never followed
+- **WHEN** the local endpoint answers the POST with a `307` or `308` redirect to another host
+- **THEN** the call is made with `redirect: 'manual'`, the redirect target is not called, and the attempt fails with the reason `<url> redirected`
+
 ### Requirement: Narrate makes one call and at most one fallback call
 Narrate SHALL make exactly one `POST <baseUrl>/chat/completions` to the primary endpoint, each call bounded by `narrateTimeoutSeconds`. When it is unreachable, times out, answers non-2xx or gives an unusable reply, narrate SHALL make at most one call to the fallback endpoint and no further call. No cloud endpoint SHALL ever be called.
 
@@ -166,7 +170,7 @@ A reply SHALL be usable when its `choices[0].message.content`, with any `<think>
 - **THEN** the reply is unusable and the fallback is called once
 
 ### Requirement: A failed narration writes nothing and exits 0
-When no attempt yields a usable reply, narrate SHALL write no vault file, append no daily line, print one stdout line `unobserved: <reason>` naming the last attempt's failure (`<url> unreachable`, `<url> timed out after <n>s`, `<url> HTTP <status>`, `<url> reply missing <label>`, `<url> is not a local endpoint`), and exit 0. With `--json` stdout SHALL be an object with `written: false` and `unobserved`.
+When no attempt yields a usable reply, narrate SHALL write no vault file, append no daily line, print one stdout line `unobserved: <reason>` naming the last attempt's failure (`<url> unreachable`, `<url> timed out after <n>s`, `<url> redirected`, `<url> HTTP <status>`, `<url> reply missing <label>`, `<url> is not a local endpoint`), and exit 0. With `--json` stdout SHALL be an object with `written: false` and `unobserved`.
 
 #### Scenario: Both endpoints down
 - **WHEN** the primary and the fallback `http://127.0.0.1:11434/v1` both refuse the connection
@@ -214,7 +218,7 @@ The resolved API key SHALL be sent only as the `Authorization: Bearer <key>` hea
 - **THEN** stderr is `dial: <dir>/items is not a directory` and the exit code is 1
 
 ### Requirement: Record syncs and narrates from a hook payload and always exits 0
-`dial record --event SessionEnd|PreCompact` SHALL read the payload (`cwd`, `session_id`, `transcript_path`) from stdin. A `cwd` not inside a registered repo SHALL exit 0 with no output and no write. Otherwise it SHALL sync the repo, then narrate the attributed note only when its newest narrative entry is older than the transcript's first `timestamp`, using `transcript_path` or `~/.claude/projects/<slug>/<session_id>.jsonl`. Every path exits 0; a failure is one stderr line.
+`dial record --event SessionEnd|PreCompact` SHALL read the payload (`cwd`, `session_id`, `transcript_path`) from stdin. A `cwd` not inside a registered repo SHALL exit 0 with no output and no write. Otherwise it SHALL sync the repo, then narrate the attributed note, using `transcript_path` or `~/.claude/projects/<slug>/<session_id>.jsonl`, unless its newest narrative entry already covers the transcript: an entry narrate wrote (source `local model (<model>)`) covers the turns up to the end of its heading's minute, so record narrates when the transcript's last text turn that is not a compaction summary is later than that; any other entry (a handoff) covers the session when it is not older than the transcript's first `timestamp`. A PreCompact narration therefore leaves the turns after compaction to SessionEnd, and a resumed session's later turns are narrated at its next end. Every path exits 0; a failure is one stderr line.
 
 #### Scenario: Unregistered cwd
 - **WHEN** the payload's `cwd` is `/tmp/scratch` and no registered repo holds it
@@ -227,6 +231,18 @@ The resolved API key SHALL be sent only as the `Authorization: Bearer <key>` hea
 #### Scenario: Session with no handoff
 - **WHEN** the newest entry is dated 2026-11-09 and the transcript starts on 2026-11-10
 - **THEN** the repo is synced, then narrate runs over that transcript, and the exit code is 0
+
+#### Scenario: SessionEnd after a PreCompact narration
+- **WHEN** the newest entry is `### 2026-11-10 15:00 · local model (qwen3.6)`, written at PreCompact, the transcript's first `timestamp` is `2026-11-10T14:00:00.000Z` and its last text turn is at `2026-11-10T15:30:00.000Z`
+- **THEN** SessionEnd syncs the repo, then narrate runs over that transcript
+
+#### Scenario: Nothing new since the last narration
+- **WHEN** the newest entry is `### 2026-11-10 15:00 · local model (qwen3.6)` and the transcript's last text turn is at `2026-11-10T15:00:20.000Z`
+- **THEN** the repo is synced and no model call is made
+
+#### Scenario: A resumed session
+- **WHEN** a session narrated at its first SessionEnd is resumed, so its transcript still starts at the original first `timestamp`, and new turns follow the narrated entry
+- **THEN** its next SessionEnd narrates again
 
 #### Scenario: Missing transcript path
 - **WHEN** the payload has `session_id` `abc` and no `transcript_path`

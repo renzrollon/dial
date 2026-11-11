@@ -41,6 +41,25 @@ A writing command — `register`, `unregister`, `sync` without `--dry-run`, `rec
 - **WHEN** `dial next`, `dial brief katipon` or `dial report` is run and the home does not exist
 - **THEN** the home still does not exist afterwards
 
+### Requirement: An unusable home is refused with the path and the OS error
+A command that needs the home SHALL fail with `dial home is not writable: <path> (<OS code>: <OS message>)` when the home cannot be created or cannot be written. Every such command except `record` SHALL exit 1 with that reason; `record`, which runs from a hook, SHALL write it as its one stderr line and exit 0. A writing command SHALL prove that by creating and removing a probe file, not by inspecting permissions. Doctor SHALL report the `home` check as `fail` with that reason and SHALL keep running.
+
+#### Scenario: Home under a read-only directory
+- **WHEN** `dial register` is run with `DIAL_HOME` pointing under a directory the user cannot write
+- **THEN** stderr names the resolved home path and the OS error code, the exit code is 1, and no registry file is written
+
+#### Scenario: Home path is a file
+- **WHEN** `DIAL_HOME` names an existing regular file
+- **THEN** a writing command other than `record` exits 1 with a reason naming that path
+
+#### Scenario: Record with a home that is a file
+- **WHEN** `dial record --event SessionEnd` is run with `DIAL_HOME` naming an existing regular file
+- **THEN** stderr is one line `dial: dial home is not writable: <path> (<OS code>: <OS message>)` naming that path, and the exit code is 0
+
+#### Scenario: Doctor tolerates a bad home
+- **WHEN** `dial doctor` is run and the home is unusable
+- **THEN** doctor still runs, reports the `home` check as failing with that reason, and exits 1
+
 ## ADDED Requirements
 
 ### Requirement: The home holds the remote cache and the logs at fixed paths

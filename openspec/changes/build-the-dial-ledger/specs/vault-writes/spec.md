@@ -7,7 +7,7 @@ When and how Dial writes into a registered vault: `dial vault init`, `dial sync`
 ## ADDED Requirements
 
 ### Requirement: vault init scaffolds a vault and reports each path
-`dial vault init <name> [--force]` SHALL ensure `Projects/`, `Changes/` and `Templates/` exist and copy `Dial.base`, `Templates/Dial Change.md`, `Dial Queries.md` and `Templates/Daily.md` when absent, printing one line `<verb> <path>` per path in that order, the verb `created`, `unchanged` or `rewritten`. `--force` SHALL rewrite a copied file whose bytes differ. Last it SHALL print `append <path of AGENTS-dial-section.md> to <vault path>/AGENTS.md by hand`.
+`dial vault init <name> [--force]` SHALL ensure `Projects/`, `Changes/` and `Templates/` exist and write `Dial.base` (generated from the state table, so its kanban `groupOrder` is the state priority list; `templates/Dial.base` holds the same text), `Templates/Dial Change.md`, `Dial Queries.md` and `Templates/Daily.md` (copied from `templates/`) when absent, printing one line `<verb> <path>` per path in that order, the verb `created`, `unchanged` or `rewritten`. `--force` SHALL rewrite a copied file whose bytes differ. Last it SHALL print `append <path of AGENTS-dial-section.md> to <vault path>/AGENTS.md by hand`.
 
 #### Scenario: First run on an empty vault
 - **WHEN** `dial vault init personal` runs and the vault `personal` holds only `.obsidian/` and `AGENTS.md`

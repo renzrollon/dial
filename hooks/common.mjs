@@ -33,8 +33,10 @@ function oneLine(text) {
 /**
  * Run one hook. `plan({ payload, entry })` returns `{ args, stdin?, relay? }` or null for nothing to do;
  * `relay` is false except for SessionStart. `gate(payload)` may return false before the registry is read.
+ * `deadlineMs`, when given, is passed to the CLI as `DIAL_DEADLINE_MS`, below `timeoutMs`, so every subprocess
+ * the CLI runs ends (and its writes start) before this hook's kill can land on it.
  */
-export function runHook(name, { gate = () => true, plan, timeoutMs }) {
+export function runHook(name, { gate = () => true, plan, timeoutMs, deadlineMs }) {
   try {
     const { raw, payload } = readPayload()
     if (!gate(payload)) return
@@ -49,7 +51,7 @@ export function runHook(name, { gate = () => true, plan, timeoutMs }) {
       input: step.stdin === 'payload' ? raw : '',
       encoding: 'utf8',
       timeout: timeoutMs,
-      env: process.env,
+      env: Number.isInteger(deadlineMs) ? { ...process.env, DIAL_DEADLINE_MS: String(deadlineMs) } : process.env,
     })
     if (result.error) throw result.error
     if (result.status !== 0) throw new Error(oneLine(result.stderr) || `dial exited ${result.status}`)
