@@ -773,7 +773,12 @@ test('fields: always ok with the six evidence lines, even with no registry', asy
     assert.equal(c.evidence[2], 'summary note: type, tags, dial_schema')
     assert.equal(c.evidence[3], 'daily note: type, updated')
     assert.equal(c.evidence[4], 'review note: title, created, updated, type, status, tags, dial_schema')
-    assert.ok(c.evidence[5].startsWith('body sections: ## State (fact, value, evidence:'))
+    // Pins specs/doctor/spec.md, "The fields check lists every frontmatter key Dial writes" (the modified
+    // requirement names `## Specs (capability names, requirement counts)` after `## Changes`).
+    assert.equal(
+      c.evidence[5],
+      'body sections: ## State (fact, value, evidence: repository-relative file paths, commands run, PR and pipeline URLs, check names, run ids), ## Changes, ## Specs (capability names, requirement counts), ## Drift (counts), ## Recent narrative (narrative text), daily log lines'
+    )
   }
 })
 

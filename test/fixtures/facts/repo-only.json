@@ -72,6 +72,10 @@
         "value": null,
         "unobserved": "no openspec dir"
       },
+      "specs": {
+        "value": null,
+        "unobserved": "no openspec dir"
+      },
       "changes": {}
     },
     "interlock": {

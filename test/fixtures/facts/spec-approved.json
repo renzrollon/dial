@@ -74,6 +74,10 @@
         "value": [],
         "evidence": "openspec/changes/archive: none"
       },
+      "specs": {
+        "value": [],
+        "evidence": "openspec/specs/: absent"
+      },
       "changes": {
         "add-login": {
           "tasks": {

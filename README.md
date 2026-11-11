@@ -198,8 +198,13 @@ repo, which asks for these values):
 dial register ~/IdeaProjects/my-repo --vault personal --host github   # or --host gitlab
 dial sync my-repo --dry-run    # shows the notes it would write; writes nothing
 dial sync my-repo              # writes Projects/my-repo.md, Changes/my-repo--*.md, Dial Summary.md
+dial handoff my-repo --text "What this project is, in one line." --source bootstrap
 ```
 
+The last command is the bootstrap step: it leaves one line about the project
+under `## Narrative` of `Projects/my-repo.md` and one `## Log` line in today's
+daily note. `scripts/add-repo.mjs` asks for that line after the first sync
+writes the notes. Run it from a terminal, outside a Claude Code session.
 
 You don't need to change or commit anything in the repo. Dial only reads it:
 
@@ -207,6 +212,7 @@ You don't need to change or commit anything in the repo. Dial only reads it:
 | --- | --- |
 | a git work tree (required) | branch, dirty, stash, ahead/behind, worktrees, last commit |
 | `openspec/changes/` | one change note per active change, with task counts |
+| `openspec/specs/` | a `## Specs` index on the repo note: each living spec's name and requirement count |
 | `.claude/ship/` (Interlock) | ship state, settle findings, merge verdict |
 | an Escapement queue entry | queued / checkpoint state |
 | Claude Code sessions for that path | last-session time (only file timestamps; transcripts are not read) |
@@ -485,7 +491,9 @@ A change note is, in order:
 5. `## State  <!-- dial:generated, do not edit -->`: a `fact | value |
    evidence` table rebuilt on every sync.
 
-A repo note adds generated `## Changes`, `## Drift` (counts) and `## Recent
+A repo note adds generated `## Changes`, `## Specs` (capability names and
+requirement counts from `openspec/specs/`; a hand-written `## Specs` section is
+replaced), `## Drift` (counts) and `## Recent
 narrative`. Each vault also holds `Dial Summary.md` (needs-me bullets),
 `Dial.base` (four views grouped by state priority), `Dial Queries.md`, and
 `Daily/YYYY-MM-DD.md` where Dial appends `- HH:mm dial ...` lines at the end of

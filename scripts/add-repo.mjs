@@ -13,7 +13,7 @@ import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveHome } from '../lib/home.mjs'
 import { collapseHome, expandHome, listRepos, loadRegistry, rootVault } from '../lib/registry.mjs'
-import { askValid, capture, choose, confirm, dial, heading, runMain } from './prompt.mjs'
+import { ask, askValid, capture, choose, confirm, dial, heading, runMain } from './prompt.mjs'
 
 function checkRepo(answer) {
   const abs = resolve(expandHome(answer))
@@ -76,7 +76,10 @@ export async function addRepo(pathArg) {
   if (await confirm(`Write the notes into vault ${vault} now?`, true)) {
     const cli = host === 'gitlab' ? 'glab' : 'gh'
     const remote = capture(cli, ['auth', 'status']) !== null && (await confirm(`Also fetch PR and CI state with ${cli}?`, false))
-    dial('sync', name, ...(remote ? ['--remote'] : []))
+    if (dial('sync', name, ...(remote ? ['--remote'] : [])) === 0) {
+      const line = (await ask('One line about this project, for its vault page (Enter to skip)')).trim()
+      if (line) dial('handoff', name, '--text', line, '--source', 'bootstrap')
+    }
   }
   console.log(`\nDone. Later: dial brief ${name}, dial next, dial sync ${name}`)
   return true

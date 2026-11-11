@@ -36,6 +36,6 @@ Worked prompts for an agent (pi, or a Claude session) reading the Dial notes in 
 
 ## Rules for the agent
 
-- Read; do not edit `## State`, `## Changes`, `## Drift` or `## Recent narrative` — Dial regenerates them.
+- Read; do not edit `## State`, `## Changes`, `## Specs`, `## Drift` or `## Recent narrative` — Dial regenerates them.
 - To add a next step or a narrative entry, run `dial handoff`, or edit `## Next` / `## Narrative` by hand.
 - Never delete a Dial note; `dial drop <repo> <change>` takes a change off the board.
