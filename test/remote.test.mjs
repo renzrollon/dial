@@ -19,6 +19,10 @@ const GH_VIEW = `gh pr view ${BRANCH} --json number,state,url,mergeable,mergeSta
 const GH_CHECKS = `gh pr checks ${BRANCH} --json name,bucket,state,link`
 const GL_VIEW = `glab mr view ${BRANCH} -F json`
 const GL_CI = `glab ci status -b ${BRANCH} -F json`
+const GH_LIST_FIELDS = 'number,title,headRefName,baseRefName,url,author,isDraft,reviewDecision,mergeable,mergeStateStatus,statusCheckRollup,updatedAt'
+const ghList = n => `gh pr list --state open --limit ${n} --json ${GH_LIST_FIELDS}`
+const GH_LIST = ghList(21)
+const GL_LIST = 'glab mr list -F json -P 21'
 const run = (table, over = {}) => {
   const home = over.home ?? tmp('remote-home-')
   const exec = fakeExec(table)
@@ -36,7 +40,8 @@ test('without remote neither CLI runs and a missing cache is unobserved', () => 
 
 test('github: open PR and a failing check, cache written', () => {
   const { out, exec, home } = run(open)
-  assert.deepEqual(exec.calls.map(c => [c.file, c.opts.cwd]), [['gh', '/repos/katipon'], ['gh', '/repos/katipon']])
+  // remote-sources, "A remote sync lists the open pull requests": view, checks, then one list.
+  assert.deepEqual(exec.calls.map(c => [c.file, c.opts.cwd]), [['gh', '/repos/katipon'], ['gh', '/repos/katipon'], ['gh', '/repos/katipon']])
   assert.deepEqual(out.pr, {
     value: { number: 38, state: 'open', url: 'https://github.com/renzrollon/katipon/pull/38', conflicting: false, mergedAt: null, updatedAt: '2026-11-09T22:10:00Z' },
     evidence: 'gh pr view 38: OPEN',
@@ -89,7 +94,8 @@ test('github: no pull request is observed none, checks not run, cache written', 
   assert.deepEqual(out.pr, { value: 'none', evidence: `gh pr view ${BRANCH}: no pull request` })
   assert.equal(out.ci.value.value, 'none')
   assert.equal(out.ci.unobserved, undefined)
-  assert.equal(exec.calls.length, 1)
+  // remote-sources, "A remote sync lists the open pull requests" ("A branch without a pull request still lists"): view, then the list.
+  assert.equal(exec.calls.length, 2)
   assert.equal(readCache(home, 'katipon').data.pr, null)
   const again = run({}, { home, opts: { remote: false } }).out
   assert.equal(again.pr.evidence, `gh pr view ${BRANCH}: no pull request as of 2026-11-10T08:00:00.000Z`)
@@ -127,7 +133,8 @@ test('gh missing from PATH and timeouts', () => {
 test('gitlab: open merge request with conflicts and a failed pipeline', () => {
   const repo = { name: 'work-api', path: '/repos/work-api', host: 'gitlab' }
   const { out, exec, home } = run({ [GL_VIEW]: { stdout: fx('glab-mr.json') }, [GL_CI]: { stdout: fx('glab-ci.json') } }, { repo })
-  assert.deepEqual(exec.calls.map(c => c.file), ['glab', 'glab'])
+  // remote-sources, "A remote sync lists the open pull requests" ("GitLab list"): mr view, ci status, mr list.
+  assert.deepEqual(exec.calls.map(c => c.file), ['glab', 'glab', 'glab'])
   assert.deepEqual(out.pr.value, { number: 12, state: 'open', url: 'https://gitlab.example/team/api/-/merge_requests/12', conflicting: true, mergedAt: null, updatedAt: '2026-11-09T22:10:00.000Z' })
   assert.equal(out.pr.evidence, 'glab mr view 12: opened, has_conflicts')
   assert.deepEqual(out.ci, { value: { value: 'fail', failing: ['pipeline'] }, evidence: `glab ci status -b ${BRANCH}: failed` })
@@ -146,7 +153,8 @@ test('gitlab: no merge request, and no pipeline', () => {
   const repo = { name: 'work-api', path: '/r', host: 'gitlab' }
   const none = run({ [GL_VIEW]: { code: 1, stderr: fx('glab-mr-none.stderr.txt') } }, { repo })
   assert.deepEqual(none.out.pr, { value: 'none', evidence: `glab mr view ${BRANCH}: no pull request` })
-  assert.equal(none.exec.calls.length, 1)
+  // remote-sources, "A remote sync lists the open pull requests": mr view, then mr list.
+  assert.equal(none.exec.calls.length, 2)
   const noPipe = run({ [GL_VIEW]: { stdout: fx('glab-mr.json') }, [GL_CI]: { code: 1, stderr: fx('glab-ci-none.txt') } }, { repo })
   assert.equal(noPipe.out.ci.evidence, `glab ci status -b ${BRANCH}: no pipeline`)
   assert.equal(noPipe.out.ci.value.value, 'none')
@@ -243,4 +251,186 @@ test('dueRemote compares fetchedAt with remoteIntervalMinutes', () => {
   const bad = seeded()
   writeFileSync(cachePath(bad, 'katipon'), 'garbage')
   assert.equal(dueRemote({ home: bad, repo: 'katipon', limits: lim, now }), true)
+})
+
+// --- the open pull request list (remote-sources: A remote sync lists the open pull requests,
+// The list is its own observation, A completed fetch writes the cache) -------------------------------
+
+const RAW_38 = {
+  number: 38, title: 'Add login', headRefName: 'feat/add-login', baseRefName: 'main',
+  url: 'https://github.com/renzrollon/katipon/pull/38', author: { login: 'renzrollon' }, isDraft: false,
+  reviewDecision: 'APPROVED', mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', statusCheckRollup: [],
+  updatedAt: '2026-11-09T22:10:00Z',
+}
+const RAW_41 = {
+  number: 41, title: 'Fix cart', headRefName: 'fix/cart', baseRefName: 'main',
+  url: 'https://github.com/renzrollon/katipon/pull/41', author: { login: 'caro' }, isDraft: true,
+  reviewDecision: '', mergeable: 'CONFLICTING', mergeStateStatus: 'DIRTY',
+  statusCheckRollup: [{ __typename: 'CheckRun', name: 'lint', status: 'COMPLETED', conclusion: 'FAILURE' }],
+  updatedAt: '2026-11-08T10:00:00Z',
+}
+const ITEM_38 = {
+  number: 38, title: 'Add login', branch: 'feat/add-login', base: 'main', url: 'https://github.com/renzrollon/katipon/pull/38',
+  author: 'renzrollon', draft: false, review: 'approved', mergeState: 'clean', conflicting: false, checks: [], updatedAt: '2026-11-09T22:10:00Z',
+}
+const ITEM_41 = {
+  number: 41, title: 'Fix cart', branch: 'fix/cart', base: 'main', url: 'https://github.com/renzrollon/katipon/pull/41',
+  author: 'caro', draft: true, review: 'none', mergeState: 'dirty', conflicting: true, checks: [{ name: 'lint', bucket: 'fail' }], updatedAt: '2026-11-08T10:00:00Z',
+}
+const listed = (...raw) => ({ stdout: JSON.stringify(raw) })
+const withList = (reply = listed(RAW_38, RAW_41)) => ({ ...open, [GH_LIST]: reply })
+const listCalls = exec => exec.calls.filter(c => c.args[1] === 'list')
+const PREV_PRS = { fetchedAt: '2026-11-10T07:00:00.000Z', items: [ITEM_38], more: false }
+const RATE = { code: 1, stderr: 'GraphQL: API rate limit exceeded for user ID 1.\n' }
+/** An exec that answers each command by key, with `timedOut` replies a table cannot express. */
+const timingExec = table => {
+  const exec = (file, args = [], opts = {}) => {
+    exec.calls.push({ file, args, opts })
+    const r = table[[file, ...args].join(' ')] ?? { code: 1, stderr: 'no reply' }
+    return { ok: false, code: null, stdout: '', stderr: '', missing: false, timedOut: false, ...r }
+  }
+  exec.calls = []
+  return exec
+}
+const GOOD_VIEW = { ok: true, code: 0, stdout: fx('gh-pr.json') }
+const GOOD_CHECKS = { ok: true, code: 0, stdout: fx('gh-checks-fail.json') }
+
+test('a remote sync runs the list once after view and checks, with limit 21 when remotePullRequests is not passed', () => {
+  const { exec } = run(withList())
+  assert.deepEqual(exec.calls.map(c => c.args.slice(0, 2).join(' ')), ['pr view', 'pr checks', 'pr list'])
+  assert.equal(exec.calls[2].args.join(' '), ghList(21).slice('gh '.length))
+  assert.equal(exec.calls[2].opts.cwd, '/repos/katipon')
+  assert.equal(listCalls(exec).length, 1)
+})
+
+test('the list asks for one more than remotePullRequests: limit 6 for 5', () => {
+  const { exec } = run({ ...open, [ghList(6)]: listed(RAW_38) }, { opts: { limits: { ...limits, remotePullRequests: 5 } } })
+  assert.equal(exec.calls.length, 3)
+  assert.equal(exec.calls[2].args.join(' '), ghList(6).slice('gh '.length))
+})
+
+test('the list runs and is cached for a branch that has no pull request', () => {
+  const { exec, home } = run({ [GH_VIEW]: { code: 1, stderr: fx('gh-pr-none.stderr.txt') }, [GH_LIST]: listed(RAW_41) })
+  assert.deepEqual(exec.calls.map(c => c.args.slice(0, 2).join(' ')), ['pr view', 'pr list'])
+  const data = readCache(home, 'katipon').data
+  assert.equal(data.pr, null)
+  assert.deepEqual(data.prs.items.map(i => i.number), [41])
+})
+
+test('a gitlab repo lists with glab mr list and never calls gh', () => {
+  const repo = { name: 'work-api', path: '/repos/work-api', host: 'gitlab' }
+  const raw = { iid: 12, title: 'Add login', source_branch: 'feat/add-login', target_branch: 'main', web_url: 'https://gitlab.example/team/api/-/merge_requests/12', author: { username: 'caro' }, draft: false, has_conflicts: false, detailed_merge_status: 'not_approved', updated_at: '2026-11-09T22:10:00Z' }
+  const { exec, home } = run({ [GL_VIEW]: { stdout: fx('glab-mr.json') }, [GL_CI]: { stdout: fx('glab-ci.json') }, [GL_LIST]: { stdout: JSON.stringify([raw]) } }, { repo })
+  assert.deepEqual(exec.calls.map(c => [c.file, c.args.slice(0, 2).join(' ')]), [['glab', 'mr view'], ['glab', 'ci status'], ['glab', 'mr list']])
+  assert.equal(exec.calls[2].args.join(' '), GL_LIST.slice('glab '.length))
+  assert.equal(readCache(home, 'work-api').data.prs.items[0].number, 12)
+})
+
+test('no list runs without remote: true, on a detached HEAD, or with writeCache false', () => {
+  const noRemote = run(withList(), { opts: { remote: false } })
+  assert.equal(noRemote.exec.calls.length, 0)
+  const detached = run(withList(), { opts: { git: git('3f50683', true) } })
+  assert.equal(detached.exec.calls.length, 0)
+  const dry = run(withList(), { opts: { writeCache: false } })
+  assert.equal(listCalls(dry.exec).length, 0)
+  assert.equal(dry.exec.calls.length, 2)
+  assert.equal(existsSync(cachePath(dry.home, 'katipon')), false)
+})
+
+test('no list runs after a failed pr view or a timed-out pr checks and the cache stays byte for byte with its prs', () => {
+  const home = seeded({ prs: PREV_PRS })
+  const before = readFileSync(cachePath(home, 'katipon'), 'utf8')
+  const failedView = run({ ...withList(), [GH_VIEW]: { code: 1, stderr: 'error connecting to api.github.com\n' } }, { home })
+  assert.equal(listCalls(failedView.exec).length, 0)
+  assert.equal(readFileSync(cachePath(home, 'katipon'), 'utf8'), before)
+
+  const exec = timingExec({ [GH_VIEW]: GOOD_VIEW, [GH_CHECKS]: { timedOut: true }, [GH_LIST]: { ok: true, code: 0, stdout: '[]' } })
+  const out = remoteFacts({ repo: { name: 'katipon', path: '/r', host: 'github' }, git: git(), home, limits, now: NOW(), remote: true, exec })
+  assert.equal(out.remote.unobserved, 'gh: timed out after 10s')
+  assert.equal(exec.calls.some(c => c.args[1] === 'list'), false)
+  assert.equal(readFileSync(cachePath(home, 'katipon'), 'utf8'), before)
+})
+
+test('the cache after a good list holds prs in the list order and no prsError', () => {
+  const { out, home } = run(withList())
+  const data = readCache(home, 'katipon').data
+  assert.deepEqual(data.prs, { fetchedAt: '2026-11-10T08:00:00.000Z', items: [ITEM_38, ITEM_41], more: false })
+  assert.equal(Object.hasOwn(data, 'prsError'), false)
+  assert.equal(data.pr.number, 38)
+  assert.deepEqual(data.checks, [{ name: 'lint', bucket: 'fail' }, { name: 'unit', bucket: 'pass' }])
+  assert.equal(out.remote.value, 'ok')
+})
+
+test('an empty list is a fetched list: prs holds no items and no prsError', () => {
+  const { home } = run(withList({ stdout: '[]' }))
+  const data = readCache(home, 'katipon').data
+  assert.deepEqual(data.prs, { fetchedAt: '2026-11-10T08:00:00.000Z', items: [], more: false })
+  assert.equal(Object.hasOwn(data, 'prsError'), false)
+})
+
+test('a failed list still writes the fresh pr and checks, keeps the previous prs and holds prsError', () => {
+  const home = seeded({ fetchedAt: '2026-11-10T07:00:00.000Z', prs: PREV_PRS })
+  const { out } = run(withList(RATE), { home })
+  const data = readCache(home, 'katipon').data
+  assert.equal(data.fetchedAt, '2026-11-10T08:00:00.000Z')
+  assert.equal(data.pr.number, 38)
+  assert.deepEqual(data.checks, [{ name: 'lint', bucket: 'fail' }, { name: 'unit', bucket: 'pass' }])
+  assert.deepEqual(data.prs, PREV_PRS)
+  assert.deepEqual(data.prsError, { at: '2026-11-10T08:00:00.000Z', reason: 'gh: GraphQL: API rate limit exceeded for user ID 1.' })
+  // the three facts are exactly what a fetch whose list succeeded returns
+  assert.equal(out.remote.value, 'ok')
+  assert.equal(out.pr.evidence, 'gh pr view 38: OPEN')
+})
+
+test('a failed list names gh missing from PATH and a timeout in prsError.reason', () => {
+  const missing = run(withList('missing'), { home: seeded({ prs: PREV_PRS }) })
+  assert.equal(readCache(missing.home, 'katipon').data.prsError.reason, 'gh: not on PATH')
+  const home = tmp('remote-home-')
+  const exec = timingExec({ [GH_VIEW]: GOOD_VIEW, [GH_CHECKS]: GOOD_CHECKS, [GH_LIST]: { timedOut: true } })
+  const out = remoteFacts({ repo: { name: 'katipon', path: '/r', host: 'github' }, git: git(), home, limits, now: NOW(), remote: true, exec })
+  assert.equal(out.remote.value, 'ok')
+  assert.equal(readCache(home, 'katipon').data.prsError.reason, 'gh: timed out after 10s')
+})
+
+test('a failed first list writes pr and checks, no prs, and prsError', () => {
+  const home = tmp('remote-home-')
+  const exec = timingExec({ [GH_VIEW]: GOOD_VIEW, [GH_CHECKS]: GOOD_CHECKS, [GH_LIST]: { timedOut: true } })
+  remoteFacts({ repo: { name: 'katipon', path: '/r', host: 'github' }, git: git(), home, limits, now: NOW(), remote: true, exec })
+  const data = readCache(home, 'katipon').data
+  assert.equal(data.pr.number, 38)
+  assert.equal(Object.hasOwn(data, 'prs'), false)
+  assert.deepEqual(data.prsError, { at: '2026-11-10T08:00:00.000Z', reason: 'gh: timed out after 10s' })
+})
+
+test('a later successful list drops prsError', () => {
+  const home = seeded({ prs: PREV_PRS, prsError: { at: '2026-11-10T07:30:00.000Z', reason: 'gh: boom' } })
+  run(withList(), { home })
+  const data = readCache(home, 'katipon').data
+  assert.equal(Object.hasOwn(data, 'prsError'), false)
+  assert.deepEqual(data.prs.items.map(i => i.number), [38, 41])
+  assert.equal(data.prs.fetchedAt, '2026-11-10T08:00:00.000Z')
+})
+
+test('a previous cache for another host does not lend its prs to a failed list', () => {
+  const home = seeded({ host: 'gitlab', prs: PREV_PRS })
+  run(withList(RATE), { home })
+  const data = readCache(home, 'katipon').data
+  assert.equal(data.host, 'github')
+  assert.equal(Object.hasOwn(data, 'prs'), false)
+  assert.equal(data.prsError.reason, 'gh: GraphQL: API rate limit exceeded for user ID 1.')
+})
+
+test('remoteFacts and dueRemote return the same for a cache with and without prs, and a failed-list cache', () => {
+  const now = new Date('2026-11-10T09:00:00Z')
+  const lim = { remoteIntervalMinutes: 30 }
+  const plain = seeded({ fetchedAt: '2026-11-10T08:50:00.000Z' })
+  const withPrs = seeded({ fetchedAt: '2026-11-10T08:50:00.000Z', prs: { fetchedAt: '2026-11-10T08:50:00.000Z', items: [ITEM_38, ITEM_41], more: true } })
+  const withErr = seeded({ fetchedAt: '2026-11-10T08:50:00.000Z', prsError: { at: '2026-11-10T08:50:00.000Z', reason: 'gh: boom' } })
+  const facts = home => run({}, { home, opts: { remote: false } }).out
+  assert.deepEqual(facts(withPrs), facts(plain))
+  assert.deepEqual(facts(withErr), facts(plain))
+  assert.equal(facts(plain).pr.evidence, 'gh pr view 38: OPEN as of 2026-11-10T08:50:00.000Z')
+  for (const home of [plain, withPrs, withErr]) assert.equal(dueRemote({ home, repo: 'katipon', limits: lim, now }), false)
+  const stale = seeded({ fetchedAt: '2026-11-10T08:15:00.000Z', prs: PREV_PRS })
+  assert.equal(dueRemote({ home: stale, repo: 'katipon', limits: lim, now }), true)
 })

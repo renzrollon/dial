@@ -5,7 +5,7 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawn } from 'node:child_process'
+import { execFile, execFileSync, spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import {
@@ -15,9 +15,9 @@ import {
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 const VERSION = readJson(join(dirname(BIN), '..', 'package.json')).version
 // Pins specs/cli-shell/spec.md, "Usage is printed on request and never as an error" (scenario
-// "Usage names every command and environment variable"): the nineteen commands.
+// "Usage names every command and environment variable"): the twenty commands, `context` (add-dial-ask) after `brief`.
 const COMMANDS = [
-  'version', 'limits', 'doctor', 'register', 'unregister', 'repos', 'help', 'vault', 'sync', 'next', 'brief',
+  'version', 'limits', 'doctor', 'register', 'unregister', 'repos', 'help', 'vault', 'sync', 'next', 'brief', 'context',
   'handoff', 'narrate', 'record', 'drop', 'agent', 'watch', 'report', 'review',
 ]
 const ENV_VARS = ['DIAL_HOME', 'DIAL_NOW', 'DIAL_LAUNCHCTL_BIN', 'ESCAPEMENT_HOME', 'ESCAPEMENT_CHECKPOINT_URL']
@@ -90,6 +90,23 @@ test('usage names the vault and agent subcommands', async () => {
   const lines = r.stdout.split('\n')
   assert.ok(lines.some(l => /^\s*vault\b.*\binit\b/.test(l)))
   assert.ok(lines.some(l => /^\s*agent\b.*\binstall\b.*\buninstall\b.*\bstatus\b/.test(l)))
+})
+
+test('the context line directly follows the brief entry and names [<repo>] and --json', async () => {
+  // Pins specs/cli-shell/spec.md, "Usage is printed on request and never as an error" (scenario "The context line
+  // follows the brief line").
+  const r = await runCli(['help'], { DIAL_HOME: makeHome() })
+  const lines = r.stdout.split('\n')
+  const entryAt = name => lines.findIndex(l => new RegExp(`^ {2}${name}\\b`).test(l))
+  const brief = entryAt('brief')
+  const context = entryAt('context')
+  assert.ok(brief >= 0 && context > brief, 'usage has a brief entry and a context entry after it')
+  const nextCommand = lines.findIndex((l, i) => i > brief && /^ {2}\S/.test(l))
+  assert.equal(nextCommand, context, `the first entry after brief is context, got ${JSON.stringify(lines[nextCommand])}`)
+  const after = lines.findIndex((l, i) => i > context && /^ {2}\S/.test(l))
+  const block = lines.slice(context, after).join('\n')
+  assert.ok(block.includes('[<repo>]'), block)
+  assert.ok(block.includes('--json'), block)
 })
 
 // --- version ----------------------------------------------------------------
@@ -211,7 +228,7 @@ test('repos --json is pretty-printed, parseable, newline-terminated, and nothing
 test('limits --json is pretty-printed', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
-  assert.equal(r.stdout, JSON.stringify(TEN_CAPS, null, 2) + '\n')
+  assert.equal(r.stdout, JSON.stringify(THIRTEEN_CAPS, null, 2) + '\n')
 })
 
 test('--json does not change the exit code: doctor --json exits 1 when a check fails, same as text', async () => {
@@ -233,8 +250,9 @@ test('--json does not change the exit code: doctor --json exits 1 when a check f
 
 // --- limits -----------------------------------------------------------------
 
-// Pins specs/limits/spec.md, "Every cap is published with a default and a description".
-const TEN_CAPS = {
+// Pins specs/limits/spec.md, "Every cap is published with a default and a description"
+// (add-dial-ask delta): thirteen caps, the last three new.
+const THIRTEEN_CAPS = {
   staleDays: 14,
   archivedKeepDays: 30,
   briefLines: 40,
@@ -244,30 +262,33 @@ const TEN_CAPS = {
   narrateTurns: 20,
   narrateTimeoutSeconds: 30,
   nextRows: 50,
-  watchPollSeconds: 30
+  watchPollSeconds: 30,
+  remotePullRequests: 20,
+  contextNarrative: 5,
+  contextLines: 200
 }
 
-test('limits with no registry file prints exactly ten caps in the published order and exits 0', async () => {
+test('limits with no registry file prints exactly thirteen caps in the published order and exits 0', async () => {
   const r = await runCli(['limits'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
   assert.ok(r.stdout.endsWith('\n'))
   const lines = r.stdout.slice(0, -1).split('\n')
-  assert.equal(lines.length, 10)
+  assert.equal(lines.length, 13)
   for (const line of lines) assert.match(line, /^\S+\s+=\s+\d+  [a-z]/)
-  Object.entries(TEN_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
+  Object.entries(THIRTEEN_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
 })
 
 test('limits --json prints the defaults as an object', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
-  assert.deepEqual(JSON.parse(r.stdout), TEN_CAPS)
-  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(TEN_CAPS))
+  assert.deepEqual(JSON.parse(r.stdout), THIRTEEN_CAPS)
+  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(THIRTEEN_CAPS))
 })
 
 test('a registry limits override is reflected and the other caps keep their defaults', async () => {
   const s = setup({ limits: { staleDays: 7 } })
   const r = await runCli(['limits', '--json'], s.env)
   assert.equal(r.code, 0)
-  assert.deepEqual(JSON.parse(r.stdout), { ...TEN_CAPS, staleDays: 7 })
+  assert.deepEqual(JSON.parse(r.stdout), { ...THIRTEEN_CAPS, staleDays: 7 })
   const text = await runCli(['limits'], s.env)
   assert.match(text.stdout.split('\n')[0], /^staleDays\s+=\s+7  /)
 })
@@ -935,6 +956,162 @@ test('next and brief run none of gh, glab, interlock or escapement and write not
   assert.equal(briefRun.code, 0, briefRun.stderr)
   assert.deepEqual(fakes.calls(), [])
   assert.deepEqual({ vault: snapshotTree(s.vaults.personal), home: snapshotTree(s.home) }, before)
+})
+
+// --- dial context (add-dial-ask: specs/context, specs/cli-shell, specs/registry) ------------------------------
+
+const AT = '2026-11-10T09:00:00Z'
+const PR_LIST = [
+  { number: 38, title: 'Add login', branch: 'feat/add-login', base: 'main', url: 'https://github.com/renzrollon/katipon/pull/38', author: 'renzrollon', draft: false, review: 'approved', mergeState: 'clean', conflicting: false, checks: [{ name: 'unit', bucket: 'pass' }], updatedAt: '2026-11-09T22:10:00Z' },
+  { number: 41, title: 'Fix typo', branch: 'fix/add-login-typo', base: 'main', url: 'https://github.com/renzrollon/katipon/pull/41', author: 'caro', draft: false, review: 'none', mergeState: 'clean', conflicting: false, checks: [], updatedAt: '2026-11-08T10:00:00Z' },
+]
+
+/** `dial` run with `cwd` as the working directory (runCli cannot set one). Never rejects. */
+function runIn(cwd, args, env = {}) {
+  return new Promise(resolve => {
+    execFile(
+      process.execPath,
+      [BIN, ...args],
+      { cwd, env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: tmp('cli-home-'), TZ: 'UTC', ...env }, timeout: 30_000 },
+      (err, stdout, stderr) => resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr })
+    )
+  })
+}
+
+/**
+ * A registered katipon (a real git work tree on feat/add-login with one change and a `lib/` directory), registered by its
+ * real path so a child's working directory resolves against it, with a cache holding a list of two pull requests, a note
+ * with narrative and Next items, and a `sync.jsonl` for the byte-for-byte checks.
+ */
+function contextLedger({ limits = {} } = {}) {
+  const s = ledger({
+    repos: [{ name: 'katipon', git: 'feat/add-login', spec: { changes: { 'add-login': { tasks: { done: 1, total: 5 } } }, files: { 'lib/index.mjs': '' } } }],
+    limits,
+  })
+  const root = realpathSync(s.paths.katipon)
+  writeJson(join(s.home, 'registry.json'), {
+    dial_schema: 'dial.registry/1', vaults: s.vaults, repos: [{ path: root, vault: 'personal', host: 'github' }], limits,
+  })
+  writeJson(join(s.home, 'cache', 'remote', 'katipon.json'), {
+    dial_schema: 'dial.cache/1', fetchedAt: '2026-11-10T08:55:00.000Z', host: 'github', branch: 'feat/add-login',
+    pr: { number: 38, state: 'open', url: PR_LIST[0].url, conflicting: false, mergedAt: null, updatedAt: '2026-11-09T22:10:00Z' },
+    checks: [{ name: 'unit', bucket: 'pass' }],
+    prs: { fetchedAt: '2026-11-10T08:50:00.000Z', items: PR_LIST, more: false },
+  })
+  writeFileSync(join(s.home, 'sync.jsonl'), '{"at":"2026-11-09T09:00:00.000Z","repo":"katipon"}\n')
+  const entries = [1, 2, 3, 4].map(n => `### 2026-11-0${n} 10:00 · dial handoff\nDone: step ${n}\nNext: step ${n + 1}\n`).join('\n')
+  makeVault(s.vaults.personal, [{
+    path: 'Projects/katipon.md',
+    body: `\n## Narrative\n\n${entries}\n## Next\n\n- [x] merge\n- [ ] archive\n`,
+  }])
+  return { ...s, repo: root, env: { ...s.env, DIAL_NOW: AT } }
+}
+
+test('context <name> --json prints one two-space-indented document and exits 0', { skip: noGit }, async () => {
+  const s = contextLedger()
+  const r = await runCli(['context', 'katipon', '--json'], s.env)
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(r.stderr, '')
+  const doc = JSON.parse(r.stdout)
+  assert.equal(r.stdout, JSON.stringify(doc, null, 2) + '\n')
+  assert.deepEqual(Object.keys(doc), ['repo', 'vault', 'host', 'at', 'git', 'pullRequests', 'items', 'next', 'narrative'])
+  assert.deepEqual([doc.repo, doc.vault, doc.host, doc.at], ['katipon', 'personal', 'github', '2026-11-10T09:00:00.000Z'])
+  assert.equal(doc.git.branch, 'feat/add-login')
+  assert.equal(doc.pullRequests.observed, true)
+  assert.deepEqual(doc.pullRequests.items.map(i => i.number), [38, 41])
+  assert.deepEqual(doc.next, [{ note: 'Projects/katipon.md', text: 'archive' }])
+})
+
+test('context without --json prints the text form: the header, then the sections', { skip: noGit }, async () => {
+  const s = contextLedger()
+  const r = await runCli(['context', 'katipon'], s.env)
+  assert.equal(r.code, 0, r.stderr)
+  assert.ok(r.stdout.endsWith('\n'))
+  const lines = r.stdout.slice(0, -1).split('\n')
+  assert.match(lines[0], /^katipon · feat\/add-login · dirty \d+ · stash 0 · ahead unobserved · behind unobserved$/)
+  assert.ok(lines.includes('pull requests: 2 open, fetched 10m ago'), r.stdout)
+  assert.ok(lines.includes('  #38 Add login · feat/add-login → main · ready yes · add-login'), r.stdout)
+  assert.ok(lines.includes('  - [ ] archive'), r.stdout)
+  for (const name of ['items', 'next', 'narrative']) assert.equal(lines.filter(l => l.startsWith(`${name}:`)).length, 1, name)
+})
+
+test('context from a subdirectory of the repo resolves the repo', { skip: noGit }, async () => {
+  const s = contextLedger()
+  const r = await runIn(join(s.repo, 'lib'), ['context', '--json'], s.env)
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(JSON.parse(r.stdout).repo, 'katipon')
+})
+
+test('context <subdirectory path> --json has repo set', { skip: noGit }, async () => {
+  const s = contextLedger()
+  const r = await runCli(['context', join(s.repo, 'lib'), '--json'], s.env)
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(JSON.parse(r.stdout).repo, 'katipon')
+})
+
+test('context on an unregistered path or directory is refused with one line and exit 1', { skip: noGit }, async () => {
+  const s = contextLedger()
+  const scratch = realpathSync(tmp('scratch-'))
+  const byArg = await runCli(['context', scratch], s.env)
+  assert.equal(byArg.code, 1)
+  assert.equal(byArg.stdout, '')
+  assert.equal(byArg.stderr, `dial: ${scratch} is not a registered repo\n`)
+  const byCwd = await runIn(scratch, ['context'], s.env)
+  assert.equal(byCwd.code, 1)
+  assert.equal(byCwd.stdout, '')
+  assert.equal(byCwd.stderr, `dial: ${scratch} is not a registered repo\n`)
+  const json = await runCli(['context', scratch, '--json'], s.env)
+  assert.equal(json.code, 1)
+  assert.equal(json.stdout, '')
+})
+
+test('context accepts --json and no other option: --hook and --session are unknown', async () => {
+  const s = ledger()
+  const hook = await runCli(['context', 'katipon', '--hook'], s.env)
+  assert.equal(hook.code, 1)
+  assert.equal(hook.stdout, '')
+  assert.equal(hook.stderr, 'dial: unknown option: --hook\n')
+  const session = await runCli(['context', 'katipon', '--session', 'abc'], s.env)
+  assert.equal(session.code, 1)
+  assert.equal(session.stderr, 'dial: unknown option: --session\n')
+})
+
+test('context runs none of gh, glab, interlock or escapement and leaves the cache, the vault and sync.jsonl byte for byte', { skip: noGit }, async () => {
+  const s = contextLedger()
+  const fakes = recorders(s.root)
+  const env = { ...s.env, PATH: fakes.PATH }
+  const before = { vault: snapshotTree(s.vaults.personal), work: snapshotTree(s.vaults.work), home: snapshotTree(s.home) }
+  assert.ok(before.home['cache/remote/katipon.json'] && before.home['sync.jsonl'], 'the cache and the log exist beforehand')
+  for (const args of [['context', 'katipon'], ['context', 'katipon', '--json']]) {
+    const r = await runCli(args, env)
+    assert.equal(r.code, 0, r.stderr)
+  }
+  assert.deepEqual(fakes.calls(), [])
+  assert.deepEqual({ vault: snapshotTree(s.vaults.personal), work: snapshotTree(s.vaults.work), home: snapshotTree(s.home) }, before)
+})
+
+test('context does not create a missing Dial home', async () => {
+  const home = join(tmp(), 'never-created')
+  const r = await runCli(['context', 'katipon'], { DIAL_HOME: home })
+  assert.equal(r.code, 1)
+  assert.equal(r.stderr, 'dial: katipon is not a registered repo\n')
+  assert.ok(!existsSync(home))
+})
+
+test('context text is cut at contextLines with the pointer line; --json is not', { skip: noGit }, async () => {
+  const full = contextLedger()
+  const all = (await runCli(['context', 'katipon'], full.env)).stdout.slice(0, -1).split('\n')
+  assert.ok(all.length > 12, `the fixture's text is long enough: ${all.length} lines`)
+  const capped = contextLedger({ limits: { contextLines: 10 } })
+  const text = await runCli(['context', 'katipon'], capped.env)
+  assert.equal(text.code, 0, text.stderr)
+  const cut = text.stdout.slice(0, -1).split('\n')
+  assert.equal(cut.length, 10)
+  assert.deepEqual(cut.slice(0, 9), all.slice(0, 9))
+  assert.equal(cut[9], `… ${all.length - 9} more lines, see dial context --json`)
+  const json = JSON.parse((await runCli(['context', 'katipon', '--json'], capped.env)).stdout)
+  assert.equal(json.narrative.length, 4)
+  assert.equal(json.pullRequests.items.length, 2)
 })
 
 test('sync without --remote runs no gh or glab and no network git command', { skip: noGit }, async () => {

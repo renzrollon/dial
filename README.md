@@ -232,6 +232,7 @@ dial repos              # what is registered
 dial sync --all         # every repo
 dial next               # what needs you, across repos
 dial brief my-repo      # the short orientation for one repo
+dial context my-repo    # open pull requests, items and notes for one repo
 ```
 
 ### 4. Connect Claude Code
@@ -252,7 +253,7 @@ with `claude --plugin-dir ~/IdeaProjects/dial`. To pick up a new version later,
 run `/plugin marketplace update dial`. Restart Claude Code after installing.
 
 **b. Allow the `dial` command.** Add the rule to `~/.claude/settings.json` so
-that `/dial:handoff` and `/dial:next` don't prompt:
+that `/dial:handoff`, `/dial:next` and `/dial:ask` don't prompt:
 
 ```json
 {
@@ -288,6 +289,7 @@ every vault and the Dial home to `~/.claude/settings.json`:
 
 **d. Check it works.** Start a new session in a registered repo. The first
 turn should carry a `dial brief`. Run `/dial:next` to see the drafted actions,
+`/dial:ask` with a question about your pull requests,
 and `/dial:handoff` before you stop. When the session ends, the `SessionEnd`
 hook syncs, and if no handoff was written it narrates (step 6).
 
@@ -409,6 +411,7 @@ dial <command> [options]
   next [--vault <name>]        every item that needs you, across repos, offline (--json)
   brief [<repo>] [--hook] [--session <id>]
                                the short orientation for one repo, offline (--json)
+  context [<repo>]             open pull requests with a ready verdict, items, Next and narrative, offline (--json)
   handoff <repo> [<change>] (--stdin | --text <t>) [--source <label>] [--next <text>]...
                                prepend a dated narrative entry to a note (--json)
   narrate <repo> [<change>] --transcript <path> [--turns <n>] [--dry-run], or narrate --eval <dir>
@@ -439,7 +442,8 @@ accept it, and then print one two-space-indented JSON document.
   copied file whose bytes differ. It never touches `.obsidian/` or `AGENTS.md`.
 - `sync <repo>` or `sync --all` collects, derives and writes. `--dry-run`
   prints every planned write and writes nothing. `--remote` fetches the PR and
-  checks with `gh` or `glab`; `--due-remote` does so only for a repo whose
+  checks with `gh` or `glab` and also lists the open pull requests;
+  `--due-remote` does so only for a repo whose
   cached reply is older than `remoteIntervalMinutes`. Without either flag no
   network command runs. A repo argument may be a name or a path inside the repo.
 - `next [--vault <name>]` lists every item that needs you, offline, in state
@@ -448,6 +452,12 @@ accept it, and then print one two-space-indented JSON document.
   repo; `--hook` wraps it in the Claude Code SessionStart envelope and prints
   nothing for an unregistered repo; `--session <id>` names the session. `--hook`
   and `--json` cannot be combined.
+- `context [<repo>]` prints, offline, the repo's git facts, its open pull
+  requests each with a `ready` verdict and `blockers`, its items, its unticked
+  Next items and the latest narrative entries, capped at `contextLines` lines
+  as text. The pull request list comes from the last remote sync and carries its
+  age; `--json` prints the whole document. It runs no subprocess and writes
+  nothing.
 - `handoff <repo> [<change>]` prepends a dated narrative entry to a note, from
   `--stdin` or `--text`, labelled by `--source`, and appends each `--next` as a
   `- [ ]` line.
@@ -592,6 +602,9 @@ its host.
 | `narrateTimeoutSeconds` | 30 | seconds before a local model call is abandoned |
 | `nextRows` | 50 | maximum rows dial next prints |
 | `watchPollSeconds` | 30 | seconds between watch polls |
+| `remotePullRequests` | 20 | open pull requests kept per repo by a remote sync |
+| `contextNarrative` | 5 | narrative entries dial context prints |
+| `contextLines` | 200 | maximum lines dial context prints as text |
 
 An unknown cap name or a non-positive-integer value is refused, naming the key
 and the file.
@@ -603,7 +616,7 @@ and the file.
 /plugin install dial@dial
 ```
 
-The plugin registers four hooks and two skills. Every hook reads its payload
+The plugin registers four hooks and three skills. Every hook reads its payload
 from stdin leniently, resolves the repo from it, costs one registry read for an
 unregistered repo, runs the plugin's own CLI, and never blocks a session.
 
@@ -615,11 +628,13 @@ unregistered repo, runs the plugin's own CLI, and never blocks a session.
 
 Skills: `/dial:handoff [<repo>] [<change>]` writes five lines of the session
 into the note through `dial handoff`; `/dial:next [--vault <name>]` shows
-`dial next` as drafted actions.
+`dial next` as drafted actions; `/dial:ask [<question>]` syncs the repo
+with `--remote`, reads `dial context` and answers the question from it.
 
 Sandbox note for the skills: `dial handoff` and `dial sync` write into the
 vault and the Dial home, so in a sandboxed Claude Code session both the vault
-directory and `$DIAL_HOME` must be writable from the sandbox. When a `dial`
+directory and `$DIAL_HOME` must be writable from the sandbox, and `/dial:ask`
+also needs the forge host (GitHub or GitLab) reachable. When a `dial`
 command fails with a permission error, report the failure and the command; do
 not retry it another way.
 

@@ -4,8 +4,8 @@ import { DESCRIPTIONS, LIMITS, effectiveLimits, formatLimits } from '../lib/limi
 
 const REG = '/tmp/home/registry.json'
 
-// Pins specs/limits/spec.md, "Every cap is published with a default and a description":
-// ten caps in this order with these defaults.
+// Pins specs/limits/spec.md, "Every cap is published with a default and a description"
+// (add-dial-ask delta): thirteen caps in this order with these defaults.
 const TEN = {
   staleDays: 14,
   archivedKeepDays: 30,
@@ -18,17 +18,19 @@ const TEN = {
   nextRows: 50,
   watchPollSeconds: 30
 }
+const NEW_CAPS = { remotePullRequests: 20, contextNarrative: 5, contextLines: 200 }
+const THIRTEEN = { ...TEN, ...NEW_CAPS }
 
-test('ten caps are published with the stated defaults in the published order, frozen (limits: Every cap is published with a default and a description)', () => {
-  assert.deepEqual({ ...LIMITS }, TEN)
-  assert.deepEqual(Object.keys(LIMITS), Object.keys(TEN))
+test('thirteen caps are published with the stated defaults in the published order, frozen (limits: Every cap is published with a default and a description)', () => {
+  assert.deepEqual({ ...LIMITS }, THIRTEEN)
+  assert.deepEqual(Object.keys(LIMITS), Object.keys(THIRTEEN))
   assert.ok(Object.isFrozen(LIMITS))
   assert.ok(Object.isFrozen(DESCRIPTIONS))
 })
 
 test('every cap has a one-line lowercase description and no other cap exists', () => {
   assert.deepEqual(Object.keys(DESCRIPTIONS), Object.keys(LIMITS))
-  assert.equal(Object.keys(LIMITS).length, 10)
+  assert.equal(Object.keys(LIMITS).length, 13)
   for (const [name, text] of Object.entries(DESCRIPTIONS)) {
     assert.equal(typeof text, 'string', name)
     assert.match(text, /^[a-z]/, name)
@@ -40,21 +42,21 @@ test('effectiveLimits with no overrides returns the defaults', () => {
   for (const overrides of [undefined, null, {}]) {
     const out = effectiveLimits(overrides, REG)
     assert.equal(out.ok, true)
-    assert.deepEqual({ ...out.limits }, TEN)
+    assert.deepEqual({ ...out.limits }, THIRTEEN)
   }
 })
 
-test('an override replaces only the key it names', () => {
+test('an override replaces only the key it names, the other twelve keep their defaults (limits: Override is reflected)', () => {
   const out = effectiveLimits({ staleDays: 7 }, REG)
   assert.equal(out.ok, true)
-  assert.deepEqual({ ...out.limits }, { ...TEN, staleDays: 7 })
+  assert.deepEqual({ ...out.limits }, { ...THIRTEEN, staleDays: 7 })
   assert.equal(LIMITS.staleDays, 14)
 })
 
 test('the seven new caps can be overridden and a bad value for one is refused naming it (limits: The registry overrides a cap)', () => {
   const out = effectiveLimits({ nextRows: 10, syncIntervalMinutes: 5 }, REG)
   assert.equal(out.ok, true)
-  assert.deepEqual({ ...out.limits }, { ...TEN, nextRows: 10, syncIntervalMinutes: 5 })
+  assert.deepEqual({ ...out.limits }, { ...THIRTEEN, nextRows: 10, syncIntervalMinutes: 5 })
   const bad = effectiveLimits({ watchPollSeconds: -30 }, REG)
   assert.equal(bad.ok, false)
   assert.match(bad.reason, /watchPollSeconds/)
@@ -81,7 +83,7 @@ test('formatLimits prints one aligned line per cap with a trailing newline', () 
   const text = formatLimits(LIMITS)
   assert.ok(text.endsWith('\n'))
   const lines = text.slice(0, -1).split('\n')
-  assert.equal(lines.length, 10)
+  assert.equal(lines.length, 13)
   const width = Math.max(...Object.keys(LIMITS).map(n => n.length))
   Object.keys(LIMITS).forEach((name, i) => {
     assert.match(lines[i], /^\S+\s+=\s+\d+  \S/)
@@ -90,6 +92,35 @@ test('formatLimits prints one aligned line per cap with a trailing newline', () 
 })
 
 test('formatLimits prints the values it is given', () => {
-  const text = formatLimits({ ...TEN, staleDays: 7 })
+  const text = formatLimits({ ...THIRTEEN, staleDays: 7 })
   assert.match(text.split('\n')[0], /^staleDays\s+=\s+7  \S/)
+})
+
+// limits: "The new caps say what they bound" (add-dial-ask delta).
+test('the three new caps are appended last, with their defaults and the descriptions the spec words', () => {
+  assert.deepEqual(Object.keys(LIMITS).slice(-3), ['remotePullRequests', 'contextNarrative', 'contextLines'])
+  assert.equal(LIMITS.remotePullRequests, 20)
+  assert.equal(LIMITS.contextNarrative, 5)
+  assert.equal(LIMITS.contextLines, 200)
+  assert.equal(DESCRIPTIONS.remotePullRequests, 'open pull requests kept per repo by a remote sync')
+  assert.equal(DESCRIPTIONS.contextNarrative, 'narrative entries dial context prints')
+  assert.equal(DESCRIPTIONS.contextLines, 'maximum lines dial context prints as text')
+})
+
+test('formatLimits ends the three new lines with their descriptions', () => {
+  const lines = formatLimits(LIMITS).slice(0, -1).split('\n')
+  assert.ok(lines[10].startsWith('remotePullRequests') && lines[10].endsWith('open pull requests kept per repo by a remote sync'))
+  assert.ok(lines[11].startsWith('contextNarrative') && lines[11].endsWith('narrative entries dial context prints'))
+  assert.ok(lines[12].startsWith('contextLines') && lines[12].endsWith('maximum lines dial context prints as text'))
+})
+
+test('the context caps can be overridden and every other cap keeps its default (limits: Override of a context cap)', () => {
+  const out = effectiveLimits({ remotePullRequests: 5, contextLines: 80 }, REG)
+  assert.equal(out.ok, true)
+  assert.deepEqual({ ...out.limits }, { ...THIRTEEN, remotePullRequests: 5, contextLines: 80 })
+  assert.deepEqual(Object.keys(out.limits), Object.keys(THIRTEEN))
+  const bad = effectiveLimits({ contextNarrative: 0 }, REG)
+  assert.equal(bad.ok, false)
+  assert.match(bad.reason, /contextNarrative/)
+  assert.match(bad.reason, /positive integer/)
 })

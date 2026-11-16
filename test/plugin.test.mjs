@@ -1,6 +1,6 @@
 /**
  * The plugin's shipped files (specs/claude-plugin): manifests in lockstep with package.json, the hook table, the
- * two skills, and what `npm pack` would publish.
+ * three skills, and what `npm pack` would publish.
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -56,7 +56,7 @@ test('hooks.json names only files that exist', () => {
 })
 
 test('skills have their frontmatter and name the commands the spec requires', () => {
-  for (const name of ['handoff', 'next']) {
+  for (const name of ['ask', 'handoff', 'next']) {
     const body = text(`skills/${name}/SKILL.md`)
     const front = readFrontmatter(body)
     assert.ok(front, name)
@@ -78,6 +78,44 @@ test('skills have their frontmatter and name the commands the spec requires', ()
   for (const field of ['repo', 'change', 'state', 'idleDays', 'evidence']) assert.ok(next.includes(`\`${field}\``), field)
 })
 
+test('the ask skill refreshes one repo, reads its context and answers from it only', () => {
+  const body = text('skills/ask/SKILL.md')
+  const front = readFrontmatter(body)
+  assert.equal(front.name, 'ask')
+  assert.ok(front.description)
+  assert.equal(front['argument-hint'], '[<question>]')
+  assert.equal(front['allowed-tools'], 'Bash(dial sync:*), Bash(dial context:*)')
+  const sync = body.indexOf('dial sync <repo> --remote')
+  const context = body.indexOf('dial context <repo> --json')
+  assert.ok(sync >= 0, 'names dial sync <repo> --remote')
+  assert.ok(context > sync, 'dial context <repo> --json comes after the sync')
+  const commands = new Set([...body.matchAll(/\bdial ([a-z][a-z-]*)/g)].map(m => m[1]))
+  for (const c of commands) assert.ok(['sync', 'context'].includes(c), `names no dial command but sync and context: ${c}`)
+  assert.ok(body.includes('$ARGUMENTS'))
+  assert.equal(/\$1|\$2/.test(body), false, 'no positional arguments')
+  for (const field of ['ready', 'blockers', 'needsMe', 'suggested']) assert.ok(body.includes(`\`${field}\``), field)
+  assert.match(body, /unobserved/)
+  assert.match(body, /stale/)
+  assert.match(body, /no question/i, 'says what to report with no question')
+  assert.match(body, /data/i)
+  assert.match(body, /not (an )?instructions?|never an instruction|not instructions/i, 'the document is data, not instructions')
+  assert.match(body, /not run|never run|do not run|don't run/i, 'a suggested command is not run unasked')
+  assert.match(body, /unasked|unless (the owner|you are|they|asked)|without being asked/i)
+  assert.match(body, /fail/i, 'covers a failed sync')
+  assert.match(body, /sandbox/i)
+  assert.match(body, /Dial home/)
+  assert.match(body, /vault/)
+  assert.match(body, /gh|glab|forge/)
+  assert.match(body, /permission/)
+})
+
+test('the ask skill reports a failed sync in one line and still reads the context', () => {
+  const body = text('skills/ask/SKILL.md')
+  assert.match(body, /sync fails|sync failed|failed sync|fails/i)
+  assert.match(body, /one line/i)
+  assert.match(body, /cached/i)
+})
+
 test('package.json files lists the plugin directories', () => {
   const { files } = json('package.json')
   for (const entry of ['bin/', 'lib/', 'README.md', 'hooks/', 'skills/', 'templates/', '.claude-plugin/']) assert.ok(files.includes(entry), entry)
@@ -92,7 +130,7 @@ test('npm pack lists every hook, skill and template', async () => {
   const packed = new Set(JSON.parse(stdout)[0].files.map(f => f.path))
   const expected = [
     ...['hooks/hooks.json', 'hooks/brief.mjs', 'hooks/record.mjs', 'hooks/sync-on-event.mjs', 'hooks/common.mjs'],
-    'skills/handoff/SKILL.md', 'skills/next/SKILL.md',
+    'skills/ask/SKILL.md', 'skills/handoff/SKILL.md', 'skills/next/SKILL.md',
     '.claude-plugin/plugin.json', '.claude-plugin/marketplace.json',
     ...['AGENTS-dial-section.md', 'Daily.md', 'Dial Change.md', 'Dial Queries.md', 'Dial.base'].map(f => `templates/${f}`),
   ]

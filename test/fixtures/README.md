@@ -100,3 +100,12 @@ Authored on 2026-11-11 for the `build-the-dial-ledger` change.
 | `interlock/drift-no-graph.json` | captured from a real `interlock drift --json` run, Interlock 1.16.0, on 2026-11-11, in this repository (no graph) | `stale.skipped` true with the no-graph reason |
 | `remote/gh-pr*.json`, `gh-checks*.json`, `glab-mr.json`, `glab-ci.json` | field lists of `gh` 2.93.0 and `glab` 1.102.0 `--help`; values hand-written | open, conflicting and merged PRs; pending and failing checks; a GitLab MR with conflicts and a failed pipeline. NOT captured from a live forge |
 | `remote/gh-pr-none.stderr.txt`, `gh-checks-none.stderr.txt`, `glab-mr-none.stderr.txt`, `glab-ci-none.txt`, `gh-auth.stderr.txt` | message strings read out of the installed `gh` 2.93.0 and `glab` 1.102.0 binaries (`no pull requests found for branch %q`, `no checks reported on the '%s' branch`, `no open merge request available for %q`, `No pipelines running or available on branch: %s`); the auth text is gh's documented not-logged-in message | the no-PR, no-checks, no-MR and no-pipeline replies. NOT live captures: the session's `gh` token was invalid and the sandbox allowed no forge host, so the exit codes and stream (stderr or stdout) are assumed. Re-capture against a real repository before relying on them |
+
+## add-dial-ask additions
+
+Authored on 2026-11-17 for the `add-dial-ask` change. Hand-written from the shapes in `design.md` §One normalised shape, NOT captured from a live forge.
+
+| file | what it pins |
+|------|--------------|
+| `remote/gh-pr-list.json` | `gh pr list --json` output: PR 38 (approved, clean, one `CheckRun` and one `StatusContext` entry) and PR 41 (draft, conflicting, `statusCheckRollup` `[]`, `reviewDecision` `""`, a title holding `—`, `\|` and a newline) |
+| `remote/glab-mr-list.json` | `glab mr list -F json` output: MR 12 (`detailed_merge_status` `not_approved`) and MR 15 (`work_in_progress`, conflicts, no `detailed_merge_status` key) |
