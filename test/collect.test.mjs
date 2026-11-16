@@ -35,6 +35,7 @@ test('a repo with no git, no OpenSpec, no Escapement home and no cache is unobse
   for (const k of Object.keys(facts.git)) assert.equal(facts.git[k].unobserved, 'git: not a work tree', k)
   assert.equal(facts.openspec.active.unobserved, 'no openspec dir')
   assert.equal(facts.openspec.archived.unobserved, 'no openspec dir')
+  assert.equal(facts.openspec.specs.unobserved, 'no openspec dir')
   assert.equal(facts.interlock.run.value, 'absent')
   assert.equal(isUnobserved(facts.interlock.drift), true)
   assert.deepEqual(facts.escapement, { entries: {} })
@@ -61,6 +62,17 @@ test('a source that throws is reported as unobserved and collectRepo still retur
   assert.equal(facts.git.branch.unobserved, 'git: spawn exploded')
   assert.equal(facts.remote.pr.unobserved, 'git: spawn exploded')
   assert.equal(facts.openspec.active.unobserved, 'no openspec dir')
+})
+
+test('an OpenSpec source that throws leaves openspec.specs unobserved with that failure\'s reason', () => {
+  const { repo, home, exec } = bare()
+  repo.path = makeRepo(tmp('collect-throw-'), { changes: { 'add-login': { files: { 'decisions.md': '| D1 | q | needs_human | — | — |\n' } } } })
+  // Reading the checkpoint URL from env is the one thing collectOpenspec does that a hostile env can break.
+  const env = new Proxy({}, { get() { throw new Error('env exploded') } })
+  const facts = collectRepo({ repo, limits: LIMITS, env, now: NOW, home, exec })
+  assert.equal(facts.openspec.active.unobserved, 'openspec: env exploded')
+  assert.equal(facts.openspec.specs?.unobserved, 'openspec: env exploded')
+  assert.equal(facts.openspec.specs?.value, null)
 })
 
 test('a populated repo: every source contributes and active changes get per-change leaves', () => {

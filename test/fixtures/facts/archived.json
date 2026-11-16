@@ -77,6 +77,10 @@
         ],
         "evidence": "openspec/changes/archive/2026-11-09-add-login: present"
       },
+      "specs": {
+        "value": [],
+        "evidence": "openspec/specs/: absent"
+      },
       "changes": {}
     },
     "interlock": {

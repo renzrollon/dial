@@ -356,8 +356,72 @@ test('repo-level state: no openspec and no PR is idle with needs_me false', () =
   assert.equal(f.needs_me, 'false')
 })
 
-test('a repo note holds Next, Narrative, then the generated Changes, Drift, Recent narrative and State', () => {
-  assert.deepEqual(sections(renderRepo()).map(s => s.heading), ['Next', 'Narrative', 'Changes', 'Drift', 'Recent narrative', STATE_HEADING])
+// Pins specs/note-rendering/spec.md, "A repo note has generated Changes, Drift, Recent narrative and State sections"
+// (the modified requirement now lists `## Specs` between `## Changes` and `## Drift`).
+test('a repo note holds Next, Narrative, then the generated Changes, Specs, Drift, Recent narrative and State', () => {
+  assert.deepEqual(sections(renderRepo()).map(s => s.heading), ['Next', 'Narrative', 'Changes', 'Specs', 'Drift', 'Recent narrative', STATE_HEADING])
+})
+
+test('a repo note with a human Links section keeps one order: Links, then Changes, Specs, Drift, Recent narrative, State', () => {
+  const edited = renderRepo().replace('## Changes', '## Links\n\n- [[x]]\n\n## Changes')
+  assert.deepEqual(
+    sections(renderRepo(repoView(), edited)).map(s => s.heading),
+    ['Next', 'Narrative', 'Links', 'Changes', 'Specs', 'Drift', 'Recent narrative', STATE_HEADING]
+  )
+})
+
+// --- the Specs section (specs/note-rendering: The Specs section indexes the living specs) ----------------------
+
+const specsCtx = (specs, evidence = 'openspec/specs/: n living') => {
+  const c = repoCtx()
+  c.facts.openspec.specs = Array.isArray(specs) ? F(specs, evidence) : specs
+  return c
+}
+const specsBody = c => sectionBody(renderRepo(repoView(), null, c), 'Specs')
+const rowLines = body => body.split('\n').filter(l => l.startsWith('|'))
+
+test('Specs lists every capability: the header, the rule and one row per living spec in the order reported', () => {
+  const body = specsBody(specsCtx([{ name: 'doctor', requirements: 14 }, { name: 'registry', requirements: 15 }]))
+  assert.deepEqual(rowLines(body), ['| capability | requirements |', '| --- | --- |', '| doctor | 14 |', '| registry | 15 |'])
+})
+
+test('Specs names a nested capability as plain text, never a wikilink', () => {
+  const body = specsBody(specsCtx([{ name: 'ui', requirements: 2 }, { name: 'ui/button', requirements: 3 }]))
+  const rows = rowLines(body)
+  assert.ok(rows.includes('| ui | 2 |'))
+  assert.ok(rows.includes('| ui/button | 3 |'))
+  assert.equal(body.includes('[['), false)
+})
+
+test('Specs with no living spec holds No living specs.', () => {
+  assert.equal(specsBody(specsCtx([], 'openspec/specs/: 0 living'))?.trim(), 'No living specs.')
+})
+
+test('Specs with the fact unobserved holds unobserved: <reason>, and a missing leaf says so', () => {
+  assert.equal(specsBody(repoCtx())?.trim(), 'unobserved: no openspec dir')
+  assert.equal(specsBody(specsCtx(U('openspec/specs/ui/button: EACCES')))?.trim(), 'unobserved: openspec/specs/ui/button: EACCES')
+  const c = repoCtx()
+  delete c.facts.openspec.specs
+  assert.equal(specsBody(c)?.trim(), 'unobserved: no specs fact')
+})
+
+test('Specs redacts a secret-shaped capability name and shows [redacted] in its row', () => {
+  const out = renderRepo(repoView(), null, specsCtx([{ name: 'ghp_abc123', requirements: 1 }]))
+  assert.ok(rowLines(sectionBody(out, 'Specs') ?? '').includes('| [redacted] | 1 |'))
+  assert.equal(out.includes('ghp_abc123'), false)
+})
+
+test('a human-written Specs section is replaced: one Specs section, the generated one, between Changes and Drift', () => {
+  const generated = specsCtx([{ name: 'registry', requirements: 3 }])
+  const first = renderRepo(repoView(), null, generated)
+  const humanOnly = first.replace(/## Specs\n[\s\S]*?(?=## Drift)/, '').replace('## Changes', '## Specs\n\nmy own notes\n\n## Changes')
+  const out = renderRepo(repoView(), humanOnly, generated)
+  const headings = sections(out).map(s => s.heading)
+  assert.equal(headings.filter(h => h === 'Specs').length, 1)
+  assert.equal(headings.indexOf('Specs'), headings.indexOf('Changes') + 1)
+  assert.equal(headings.indexOf('Drift'), headings.indexOf('Specs') + 1)
+  assert.equal(out.includes('my own notes'), false)
+  assert.ok(rowLines(sectionBody(out, 'Specs')).includes('| registry | 3 |'))
 })
 
 test('git missing: branch, dirty, stash, ahead, behind and last_commit are unobserved, not 0 or empty', () => {

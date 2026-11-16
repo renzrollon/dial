@@ -12,27 +12,383 @@ the pipeline end to end.
 
 ## Install
 
-Node >= 22, no runtime dependencies.
+Node >= 22, no runtime dependencies. For the full setup, including Obsidian,
+the registry, per-repo registration and Claude Code, see
+[Setup on your machine](#setup-on-your-machine).
 
 ```sh
-git clone <this repo> && cd dial
+git clone https://github.com/renzrollon/dial.git && cd dial
 npm i -g .
 dial doctor
 ```
 
-`dial doctor` is the first thing to run. It exits 1 when any check fails. The
-skills and hooks call `dial` by name, so it must be on `PATH` (`doctor` warns
-under `on-path` when it is not).
+## Setup on your machine
 
-First use, in order:
+### The quick way: two scripts
+
+Two interactive scripts do the steps below for you. They ask one question at a
+time, show a `[default]` you can accept with Enter, and ask before they change
+anything:
 
 ```sh
-# 1. declare the vault in $DIAL_HOME/registry.json under "vaults" (Dial never creates a vault)
-dial vault init personal            # scaffold Projects/, Changes/, Templates/, Dial.base
+node ~/IdeaProjects/dial/scripts/setup.mjs              # once per machine
+node ~/IdeaProjects/dial/scripts/add-repo.mjs [<path>]  # once per repo; the path defaults to the repo you are in
+```
+
+`setup.mjs` checks Node and git, offers `npm i -g .`, asks for your vaults
+(name and folder) and optional `roots`, writes `registry.json`, runs
+`dial vault init` and appends the AGENTS.md section to each vault, installs
+the Claude Code plugin, adds `Bash(dial:*)` and the sandbox write paths to
+`~/.claude/settings.json` (after a timestamped backup), and offers the
+LaunchAgent. Then it registers repos in a loop and ends with `dial doctor`.
+You can run it again safely: it skips what is already in place.
+
+`add-repo.mjs` asks for the path, the vault (it picks the vault itself when the
+repo is under a `roots` entry or only one vault exists) and the host (guessed
+from `origin`). It runs `dial register`, offers a `--dry-run` preview, then
+syncs, optionally with `--remote`.
+
+If input ends before the last question (for example, piped answers), a script
+stops. It does not take defaults for the questions left.
+
+Creating the vault in Obsidian and turning on **Bases** (step 2a and 2b) stay
+manual. The sections below describe each step in full if you want to do it by
+hand.
+
+### By hand
+
+Setup has four parts, done once, in this order:
+
+1. [Install the `dial` CLI](#1-install-the-cli).
+2. [Prepare each Obsidian vault](#2-prepare-each-obsidian-vault).
+3. [Register each repository](#3-register-each-repository).
+4. [Connect Claude Code](#4-connect-claude-code).
+
+The other steps are optional:
+[background sync](#5-optional-background-sync),
+[session narration with a local model](#6-optional-session-narration) and
+[PR and CI state](#7-optional-pr-and-ci-state). At the end,
+[check the setup](#8-check-the-setup).
+
+### Prerequisites
+
+| Need | Why | Check |
+| --- | --- | --- |
+| macOS | the LaunchAgent; everything else is plain Node | |
+| Node >= 22 | the CLI and the hooks | `node --version` |
+| git | the main source of facts | `git --version` |
+| Obsidian >= 1.9 with the **Bases** core plugin | shows `Dial.base` | Settings → Core plugins → Bases |
+| Claude Code | optional: the brief, record and handoff hooks | `claude --version` |
+| `gh` / `glab`, logged in | optional: PR and CI state under `--remote` | `gh auth status` |
+| OpenSpec, Interlock, Escapement | optional: Dial reads their files when present, and a missing one is reported as `unobserved` | |
+| An OpenAI-compatible local model | optional: `dial narrate` and the auto-narrate on `SessionEnd` | |
+
+Dial has no runtime dependencies, so there is no `npm install` step for its
+code.
+
+### 1. Install the CLI
+
+```sh
+git clone https://github.com/renzrollon/dial.git ~/IdeaProjects/dial
+cd ~/IdeaProjects/dial
+npm i -g .          # links the checkout, so a `git pull` updates `dial`
+dial version
+dial doctor         # at this point: home and registry say "first register" / "no registry yet"
+```
+
+The skills call `dial` by name, so it must be on `PATH` (`doctor` checks this
+under `on-path`).
+
+**mise, nvm or asdf users:** `npm i -g` installs into the *current* Node's
+global directory. After you switch or upgrade Node, `dial` is no longer on
+`PATH`. Run `npm i -g .` again, then `dial agent install` again if you use the
+LaunchAgent, because its plist records the absolute paths of `node` and
+`dial`.
+
+### 2. Prepare each Obsidian vault
+
+Use one vault per boundary, for example `personal` and `work`. Dial never
+creates a vault directory and never moves a repo between vaults, so choose the
+split before you register anything.
+
+**a. Create the vault in Obsidian.** Choose *Open another vault → Create new
+vault*, or *Open folder as vault* on an existing folder. Rules for where a
+vault can live:
+
+- Do not put one vault inside another (`doctor` warns under `vault-nesting`).
+- Do not put a vault inside a git repository that Dial tracks.
+- If you sync the vault (iCloud, Obsidian Sync, git), that is fine: Dial writes
+  plain files atomically.
+
+**b. Turn on the Obsidian features Dial uses.** Set these in Obsidian →
+Settings:
+
+| Setting | Value | Needed? |
+| --- | --- | --- |
+| Core plugins → **Bases** | on | yes, for `Dial.base` |
+| Core plugins → **Daily notes** → New file location | `Daily` | recommended: Dial appends to `Daily/YYYY-MM-DD.md` |
+| Core plugins → **Daily notes** → Template file location | `Templates/Daily` | recommended: your daily notes then carry the `## Log` heading Dial appends under |
+| Core plugins → **Templates** → Template folder location | `Templates` | optional |
+| Files & links → Detect all file extensions | off (default) | `Dial.base` is still shown, because Bases owns `.base` |
+
+The `Needs me` view in `Dial.base` is a `kanban` view. If your Obsidian build
+does not have a kanban view for Bases, the view is shown as unsupported. In
+that case, install a community plugin that adds one, or use the other three
+views (`In flight`, `Stale` and `By repo`), which are plain
+tables.
+
+The `obsidian` command-line tool is optional. Dial writes files directly, and
+`doctor` reports `skip` when the tool is absent.
+
+**c. Declare the vault in the registry.** No command adds a vault. You edit
+`$DIAL_HOME/registry.json` by hand once (default `~/.config/dial/registry.json`).
+If the file does not exist yet, create it:
+
+```sh
+mkdir -p ~/.config/dial
+cat > ~/.config/dial/registry.json <<'JSON'
+{
+  "dial_schema": "dial.registry/1",
+  "vaults": {
+    "personal": "/Users/you/Obsidian/personal",
+    "work": "/Users/you/Obsidian/work"
+  },
+  "repos": [],
+  "limits": {}
+}
+JSON
+```
+
+If the file already exists, add your vault under `"vaults"` and leave the rest
+as it is. A vault path can be absolute or start with `~/`. Use the folder that
+contains `.obsidian/`.
+
+To keep a whole directory on one side of the boundary, add `roots`. After that,
+`register` refuses a repo under that directory if it names any other vault:
+
+```json
+  "roots": { "~/VSCodeProjects": "work", "~/IdeaProjects": "personal" }
+```
+
+**d. Scaffold the vault.**
+
+```sh
+dial vault init personal     # creates Projects/, Changes/, Templates/, Dial.base, Dial Queries.md, Templates/Daily.md
+```
+
+`vault init` is idempotent, so you can re-run it. `--force` rewrites a shipped
+file that you changed. It never touches `.obsidian/` or `AGENTS.md`.
+
+**e. Add the AGENTS.md section** (once per vault, by hand; Dial never edits
+`AGENTS.md`). This tells an agent working in the vault which sections are
+generated:
+
+```sh
+cat ~/IdeaProjects/dial/templates/AGENTS-dial-section.md >> /Users/you/Obsidian/personal/AGENTS.md
+```
+
+Repeat c to e for every vault.
+
+### 3. Register each repository
+
+For each repo you want in the ledger (or run `scripts/add-repo.mjs` in the
+repo, which asks for these values):
+
+```sh
+dial register ~/IdeaProjects/my-repo --vault personal --host github   # or --host gitlab
+dial sync my-repo --dry-run    # shows the notes it would write; writes nothing
+dial sync my-repo              # writes Projects/my-repo.md, Changes/my-repo--*.md, Dial Summary.md
+dial handoff my-repo --text "What this project is, in one line." --source bootstrap
+```
+
+The last command is the bootstrap step: it leaves one line about the project
+under `## Narrative` of `Projects/my-repo.md` and one `## Log` line in today's
+daily note. `scripts/add-repo.mjs` asks for that line after the first sync
+writes the notes. Run it from a terminal, outside a Claude Code session.
+
+You don't need to change or commit anything in the repo. Dial only reads it:
+
+| If the repo has... | Dial reads... |
+| --- | --- |
+| a git work tree (required) | branch, dirty, stash, ahead/behind, worktrees, last commit |
+| `openspec/changes/` | one change note per active change, with task counts |
+| `openspec/specs/` | a `## Specs` index on the repo note: each living spec's name and requirement count |
+| `.claude/ship/` (Interlock) | ship state, settle findings, merge verdict |
+| an Escapement queue entry | queued / checkpoint state |
+| Claude Code sessions for that path | last-session time (only file timestamps; transcripts are not read) |
+
+A repo with none of these optional sources still gets a repo note with its git
+state.
+
+The repo name is the directory's basename, and names must be unique. To move a
+repo to another vault, run `dial unregister my-repo`, then `dial register ...
+--vault other`. The notes already in the old vault stay there, because Dial
+never deletes.
+
+Useful afterwards:
+
+```sh
+dial repos              # what is registered
+dial sync --all         # every repo
+dial next               # what needs you, across repos
+dial brief my-repo      # the short orientation for one repo
+```
+
+### 4. Connect Claude Code
+
+The Claude Code setup applies to every repo at once: the plugin, the
+permission rule and the sandbox paths are all user-scoped. The hooks do
+nothing in a repo that is not registered (they cost one registry read).
+
+**a. Install the plugin** (inside Claude Code):
+
+```
+/plugin marketplace add renzrollon/dial
+/plugin install dial@dial
+```
+
+To try your local checkout instead of the published plugin, start a session
+with `claude --plugin-dir ~/IdeaProjects/dial`. To pick up a new version later,
+run `/plugin marketplace update dial`. Restart Claude Code after installing.
+
+**b. Allow the `dial` command.** Add the rule to `~/.claude/settings.json` so
+that `/dial:handoff` and `/dial:next` don't prompt:
+
+```json
+{
+  "permissions": {
+    "allow": ["Bash(dial:*)"]
+  }
+}
+```
+
+Merge it into your existing `permissions.allow` array, and keep the JSON valid
+(a comma after each array or value that is followed by another key). If the
+file is invalid JSON, Claude Code cannot apply any of it, and `dial doctor`
+shows `user: ... (unreadable: ...)` under `permissions`.
+
+**c. Let sandboxed commands write to the vault and the Dial home.** Skip this
+if you don't run Claude Code with the sandbox. Hooks run outside the sandbox,
+but the skills run `dial handoff` and `dial sync` through Bash, inside it. Add
+every vault and the Dial home to `~/.claude/settings.json`:
+
+```json
+{
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "~/.config/dial",
+        "~/Obsidian/personal",
+        "~/Obsidian/work"
+      ]
+    }
+  }
+}
+```
+
+**d. Check it works.** Start a new session in a registered repo. The first
+turn should carry a `dial brief`. Run `/dial:next` to see the drafted actions,
+and `/dial:handoff` before you stop. When the session ends, the `SessionEnd`
+hook syncs, and if no handoff was written it narrates (step 6).
+
+### 5. Optional: background sync
+
+```sh
+dial agent install    # LaunchAgent: `dial sync --all --due-remote` at login and every syncIntervalMinutes (15)
+dial agent status     # running / loaded-not-running / not-loaded / paths-missing / not-installed
+```
+
+Its logs are in `~/.config/dial/logs/agent.{out,err}.log`. Run `dial agent
+install` again after any change to Node or to the location of `dial`. If you
+want immediate updates instead of polling, keep `dial watch` running in a
+terminal. It syncs a repo as soon as its `.claude/ship/` or
+`openspec/changes/` changes.
+
+### 6. Optional: session narration
+
+`dial narrate` (and `dial record` when no handoff was written) asks a local
+OpenAI-compatible model for five lines about the session. Dial picks the
+endpoint in this order:
+
+1. The `mtplx` provider (or whichever provider `narrate.provider` names) in
+   pi's `~/.pi/agent/models.json`: its `baseUrl`, its `apiKey` and its first
+   model.
+2. Overridden key by key by the registry's `narrate` block:
+
+   ```json
+   "narrate": { "url": "http://127.0.0.1:8000/v1", "model": "qwen3.6", "apiKeyEnv": "MY_LOCAL_KEY" }
+   ```
+
+3. If the primary call fails, the fallback: `narrate.fallbackUrl` and
+   `narrate.fallbackModel`, by default `http://127.0.0.1:11434/v1` (Ollama)
+   and `qwen3.6`.
+
+`apiKeyEnv` names an environment variable. Never put the key itself in the
+registry. Check the setup without calling the model:
+
+```sh
+dial narrate my-repo --transcript ~/.claude/projects/<slug>/<session>.jsonl --dry-run
+```
+
+If no model is running, narration fails quietly and the session ends as
+normal.
+
+### 7. Optional: PR and CI state
+
+```sh
+gh auth login          # GitHub repos
+glab auth login        # GitLab repos
+dial sync my-repo --remote
+```
+
+Without `--remote` or `--due-remote`, Dial makes no network calls. PR and CI
+fields show the cached reply, or `unobserved` when there is none. The
+LaunchAgent uses `--due-remote`, so it refreshes at most every
+`remoteIntervalMinutes` (30).
+
+### 8. Check the setup
+
+```sh
+dial doctor
+```
+
+A complete setup prints `DIAL OK`. Every row is `ok`, except `launch-agent`,
+which is `skip` if you didn't install it, and `narrate-endpoint`, which is
+`skip` if no model is configured. Then open `Dial.base` and `Dial Summary.md`
+in Obsidian.
+
+| Doctor row | Fix |
+| --- | --- |
+| `registry` FAIL | the JSON in `registry.json` is invalid, or a vault path is not a directory: fix the file, or create the folder in Obsidian |
+| `boundary` FAIL | a Dial note is in the wrong vault, or a repo contradicts `roots`: move the note to its repo's vault, or fix the registry |
+| `permissions` warn, `unreadable` | a settings file is invalid JSON: fix the file it names (often a missing comma) |
+| `permissions` warn, not allowed | step 4b |
+| `vault-scaffold` warn | `dial vault init <name>` |
+| `vault-nesting` warn | move one vault out of the other |
+| `on-path` warn | `npm i -g .` in the checkout (again after a Node switch) |
+| `launch-agent` `paths-missing` | `dial agent install` again |
+
+### Updating and removing
+
+- Update: `git pull` in the checkout (the global link follows it), then
+  `/plugin marketplace update dial` in Claude Code.
+- Remove: `dial agent uninstall`, `/plugin uninstall dial@dial`, `npm rm -g
+  dial`. Then delete `~/.config/dial` if you want. The vault notes are yours;
+  Dial does not remove them.
+
+### First run on a new machine, in one block
+
+```sh
+git clone https://github.com/renzrollon/dial.git ~/IdeaProjects/dial && cd ~/IdeaProjects/dial && npm i -g .
+# create the vault in Obsidian, enable Bases, then add it under "vaults" in ~/.config/dial/registry.json
+dial vault init personal
+cat templates/AGENTS-dial-section.md >> ~/Obsidian/personal/AGENTS.md
 dial register ~/IdeaProjects/dial --vault personal --host github
-dial sync dial --dry-run            # the planned writes, nothing written
-dial sync dial                      # write the notes
-dial next                           # what needs you, across repos
+dial sync dial
+dial agent install
+# in ~/.claude/settings.json: permissions.allow += "Bash(dial:*)"; sandbox.filesystem.allowWrite += vault and ~/.config/dial
+# in Claude Code: /plugin marketplace add renzrollon/dial, then /plugin install dial@dial
+dial doctor
 ```
 
 ## Commands
@@ -135,7 +491,9 @@ A change note is, in order:
 5. `## State  <!-- dial:generated, do not edit -->`: a `fact | value |
    evidence` table rebuilt on every sync.
 
-A repo note adds generated `## Changes`, `## Drift` (counts) and `## Recent
+A repo note adds generated `## Changes`, `## Specs` (capability names and
+requirement counts from `openspec/specs/`; a hand-written `## Specs` section is
+replaced), `## Drift` (counts) and `## Recent
 narrative`. Each vault also holds `Dial Summary.md` (needs-me bullets),
 `Dial.base` (four views grouped by state priority), `Dial Queries.md`, and
 `Daily/YYYY-MM-DD.md` where Dial appends `- HH:mm dial ...` lines at the end of

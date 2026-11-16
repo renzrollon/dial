@@ -12,7 +12,7 @@ stage touches a vault.
 | Source | Reads |
 | --- | --- |
 | git | branch, dirty, stash, ahead/behind, worktrees, last commit |
-| OpenSpec | `openspec/changes/` and its archive, task counts |
+| OpenSpec | `openspec/changes/` and its archive, task counts, and `openspec/specs/` (capability names, requirement counts) |
 | Interlock | `.claude/ship/` run state, outcomes, settle findings, merge verdict, `interlock drift --json` |
 | Escapement | the queue under `ESCAPEMENT_HOME` |
 | Claude Code sessions | the last session per repo (transcript metadata only) |
@@ -66,7 +66,8 @@ give the same items.
 The renderer turns an item into a note: frontmatter in a fixed key order, the
 human-owned `## Next` and `## Narrative` carried over byte for byte, any human
 section kept, and the generated `## State` table (`fact | value | evidence`)
-last. Repo notes add `## Changes`, `## Drift` and `## Recent narrative`.
+last. Repo notes add `## Changes`, `## Specs`, `## Drift` and `## Recent narrative`.
+After the first sync, `dial handoff <repo> --text "…" --source bootstrap` leaves one line about the project under `## Narrative`.
 Nothing in a written note is computed from the clock, so `updated` moves only
 when the bytes do. Rendering reads and writes no file.
 

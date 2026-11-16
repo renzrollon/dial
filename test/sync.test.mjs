@@ -122,6 +122,37 @@ test('a human\'s ## Next and ## Narrative survive the next sync', () => {
   assert.equal(fm(s.vault, 'Changes/katipon--add-login.md').state, 'archive-pending')
 })
 
+// --- the Specs index (specs/note-rendering: The Specs section indexes the living specs) ---------------------
+
+const specBody = n => `# registry\n\n## Purpose\nWhat it is.\n\n${Array.from({ length: n }, (_, i) => `### Requirement: R${i}\nThe system SHALL.\n`).join('\n')}`
+const withRegistry = n => ({
+  katipon: { changes: { 'add-login': { tasks: { done: 1, total: 2 } } }, files: { 'openspec/specs/registry/spec.md': specBody(n) } },
+})
+
+test('the first sync writes the Specs row, and a second sync leaves the vault byte-identical', () => {
+  const s = setup({ repos: withRegistry(3) })
+  s.run()
+  assert.ok(read(s.vault, 'Projects/katipon.md').includes('| registry | 3 |'))
+  const before = snapshotTree(s.vault)
+  const again = s.run()
+  assert.equal(again.written, 0)
+  assert.ok(read(s.vault, 'Projects/katipon.md').includes('| registry | 3 |'))
+  assert.deepEqual(snapshotTree(s.vault), before)
+})
+
+test('a requirement added before a sync on a later day rewrites the repo note with the new count and updated', () => {
+  const s = setup({ repos: withRegistry(3) })
+  s.run()
+  assert.equal(fm(s.vault, 'Projects/katipon.md').updated, '2026-11-10')
+  writeFileSync(join(s.paths.katipon, 'openspec/specs/registry/spec.md'), specBody(4))
+  const next = s.run({ now: new Date('2026-11-11T09:00:00Z') })
+  assert.equal(next.writes.find(w => w.path.endsWith('Projects/katipon.md')).verb, 'update')
+  const text = read(s.vault, 'Projects/katipon.md')
+  assert.ok(text.includes('| registry | 4 |'))
+  assert.equal(text.includes('| registry | 3 |'), false)
+  assert.equal(fm(s.vault, 'Projects/katipon.md').updated, '2026-11-11')
+})
+
 // --- the dry run ----------------------------------------------------------------
 
 test('a dry run writes nothing, creates no home and no folder, and prints every planned path', () => {

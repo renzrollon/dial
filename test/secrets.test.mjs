@@ -127,6 +127,24 @@ test('planted secrets in facts, evidence, narrative and daily lines never reach 
   }
 })
 
+test('planted secrets as capability names are written as [redacted] rows and never reach a written file', () => {
+  const { vault, registry } = build()
+  const view = {
+    state: 'idle', needsMe: false, stale: false, lastActivity: '2026-11-09T18:30:00.000Z', evidence: null, rows: [], items: [],
+  }
+  const facts = { openspec: { specs: F(PLANTED.map(name => ({ name, requirements: 1 })), 'openspec/specs/: 10 living') } }
+  const ctx = { repo: 'risk-model', scope: 'personal', today: '2026-11-10', facts, recentNarrative: [] }
+  const repoText = renderRepoNote(view, null, ctx)
+  const result = applyWrites(vault, [{ path: 'Projects/risk-model.md', content: repoText }], { registry, repo: 'risk-model' })
+  assert.equal(result.ok, true)
+  const written = readFileSync(join(vault, 'Projects/risk-model.md'), 'utf8')
+  assert.ok(written.includes('| [redacted] | 1 |'), 'a [redacted] row is written for a secret-shaped capability name')
+  for (const file of filesUnder(vault)) {
+    const text = readFileSync(file, 'utf8')
+    for (const pattern of FORBIDDEN) assert.doesNotMatch(text, pattern, `${file} matches ${pattern}`)
+  }
+})
+
 test('a name containing risk-model survives: the prefixes are matched at a word start only', () => {
   const { vault, registry } = build()
   const ctx = { repo: 'risk-model', scope: 'personal', today: '2026-11-10' }
