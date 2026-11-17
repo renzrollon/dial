@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dial voice</title>
+<link rel="stylesheet" href="/page.css">
+</head>
+<body>
+<main>
+  <h1>Dial voice</h1>
+  <p class="purpose">Ask Dial aloud while you work: it checks your repos and answers in a sentence.</p>
+
+  <div class="controls">
+    <button type="button" id="start">Start</button>
+    <button type="button" id="mute" aria-pressed="false">Mute</button>
+    <button type="button" id="stop">Stop</button>
+    <button type="button" id="quit">Quit</button>
+  </div>
+
+  <p id="status" role="status" tabindex="-1">Not started</p>
+  <p id="error" role="alert"></p>
+  <p id="notice" aria-live="polite"></p>
+  <p id="interim"></p>
+
+  <div id="transcript" role="log" aria-label="Transcript">
+    <p id="empty">Ask what needs you, or whether a pull request can merge. Try: &quot;what needs me?&quot;</p>
+  </div>
+
+  <form id="turn-form" autocomplete="off">
+    <label for="turn">Ask Dial</label>
+    <input type="text" id="turn" name="turn">
+  </form>
+</main>
+<script type="module" src="/page.js"></script>
+</body>
+</html>

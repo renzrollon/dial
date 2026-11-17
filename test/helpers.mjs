@@ -287,3 +287,126 @@ export function frozenNow(iso) {
   }
   return now
 }
+
+/**
+ * A scripted stand-in for `lib/spawn.mjs` `spawnChild` (design §13). Returns
+ * `{ spawn, children }`: `spawn(file, args, { cwd, env, onLine, onExit, killGraceMs })`
+ * has the signature of `spawnChild`, starts nothing, and pushes one record on
+ * `children` per call, in call order:
+ *
+ *   file, args, cwd, env, killGraceMs   as passed
+ *   pid                                 a distinct fake pid
+ *   written                             every text `write` accepted, in order
+ *   ended                               true once `end()` or `kill()` closed stdin
+ *   killed                              true once `kill()` was called; `kills` counts the calls
+ *   exited                              true once `exit()` ran
+ *   line(text)                          the child wrote `text` and a newline to stdout
+ *                                       (nothing after `exit()`)
+ *   exit({ code, signal, stderr, error })
+ *                                       the child exited: `onExit` runs once with the
+ *                                       defaults `code` 0, `signal` null, `stderr` '',
+ *                                       `error` null; a second call does nothing
+ *
+ * The fake never exits by itself: `kill()` only records, as the real handle
+ * does until the group is gone, so a test decides when the exit arrives. After
+ * `exit()` or `end()` or `kill()`, `write` returns false and records nothing,
+ * as `spawnChild`'s handle does.
+ */
+export function fakeSpawn() {
+  const children = []
+  let nextPid = 40_000
+  const spawn = (file, args = [], { cwd, env, onLine, onExit, killGraceMs } = {}) => {
+    const child = {
+      file,
+      args: [...args],
+      cwd,
+      env,
+      killGraceMs,
+      pid: nextPid++,
+      written: [],
+      ended: false,
+      killed: false,
+      kills: 0,
+      exited: false,
+      line(text) {
+        if (!child.exited) onLine?.(text)
+      },
+      exit({ code = 0, signal = null, stderr = '', error = null } = {}) {
+        if (child.exited) return
+        child.exited = true
+        onExit?.({ code, signal, stderr, error })
+      },
+    }
+    children.push(child)
+    return {
+      pid: child.pid,
+      write(text) {
+        if (child.exited || child.ended || child.killed) return false
+        child.written.push(text)
+        return true
+      },
+      end() {
+        child.ended = true
+      },
+      kill() {
+        child.killed = true
+        child.kills += 1
+        child.ended = true
+      },
+    }
+  }
+  return { spawn, children }
+}
+
+/**
+ * A manual clock with the four timer functions of the globals. Returns
+ * `{ timers, advance(ms) }`; `timers` is `{ setTimeout, clearTimeout,
+ * setInterval, clearInterval }` and nothing runs until `advance(ms)` moves the
+ * clock forward, running every timeout and interval that falls due in time
+ * order (equal times in the order they were set). A timer set by a callback
+ * runs in the same `advance` when it falls due inside the window. Handles are
+ * objects with `ref()`, `unref()` and `hasRef()`, as Node's are. An interval
+ * of 0 ms counts as 1 ms so a run always ends.
+ */
+export function fakeTimers() {
+  let now = 0
+  let seq = 0
+  const pending = new Map()
+  const make = (fn, ms, args, every) => {
+    const delay = Math.max(1, Number(ms) || 0)
+    const handle = { ref: () => handle, unref: () => handle, hasRef: () => true }
+    pending.set(handle, { fn, args, at: now + delay, every: every ? delay : 0, seq: seq++ })
+    return handle
+  }
+  const clear = handle => {
+    pending.delete(handle)
+  }
+  const timers = {
+    setTimeout: (fn, ms, ...args) => make(fn, ms, args, false),
+    clearTimeout: clear,
+    setInterval: (fn, ms, ...args) => make(fn, ms, args, true),
+    clearInterval: clear,
+  }
+  const advance = ms => {
+    const end = now + ms
+    for (;;) {
+      let next
+      for (const [handle, t] of pending) {
+        if (t.at > end) continue
+        if (!next || t.at < next.t.at || (t.at === next.t.at && t.seq < next.t.seq)) next = { handle, t }
+      }
+      if (!next) break
+      const { handle, t } = next
+      now = t.at
+      if (t.every) {
+        t.at += t.every
+        t.seq = seq++
+      } else {
+        pending.delete(handle)
+      }
+      t.fn(...t.args)
+    }
+    now = end
+  }
+  return { timers, advance }
+}
