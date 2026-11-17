@@ -3,7 +3,7 @@
 ## ADDED Requirements
 
 ### Requirement: The ask skill refreshes one repo and reads its context
-`skills/ask/SKILL.md` SHALL have frontmatter `name` `ask`, `description`, `argument-hint` `[<question>]` and `allowed-tools` `Bash(dial sync:*), Bash(dial context:*)`. It SHALL tell the session to run `dial sync <repo> --remote` and then `dial context <repo> --json`, where `<repo>` is the session's repository unless the question names another registered repo. When the sync fails, the session SHALL say so in one line and still read the context.
+`skills/ask/SKILL.md` SHALL have frontmatter `name` `ask`, `description`, `argument-hint` `[<question>]` and `allowed-tools` `Bash(dial sync:*), Bash(dial context:*)`. It SHALL tell the session to run `dial sync <repo> --remote --json` and then `dial context <repo> --json`, where `<repo>` is the session's repository unless the question names another registered repo. When the sync fails, the session SHALL say so in one line and still read the context. When the sync exits 0 but the repo's row has a `remote` field carrying `unobserved`, the refresh failed: the session SHALL say so in one line with that reason and say the answer comes from the cached list, whether or not the list is `stale`.
 
 #### Scenario: Frontmatter keys
 - **WHEN** the skill's frontmatter is parsed
@@ -11,11 +11,15 @@
 
 #### Scenario: Skill text names the two commands in order
 - **WHEN** `skills/ask/SKILL.md` is read
-- **THEN** it contains `dial sync <repo> --remote` before `dial context <repo> --json`, and names no `dial` command other than `dial sync` and `dial context`
+- **THEN** it contains `dial sync <repo> --remote --json` before `dial context <repo> --json`, and names no `dial` command other than `dial sync` and `dial context`
 
 #### Scenario: Skill text covers a failed sync
 - **WHEN** `skills/ask/SKILL.md` is read
 - **THEN** it tells the session to report a failed sync and to answer from the cached context all the same
+
+#### Scenario: Skill text covers a failed fetch under the interval
+- **WHEN** `skills/ask/SKILL.md` is read
+- **THEN** it tells the session to read the sync row's `remote` field, and when it carries `unobserved` to report the failed refresh with its reason and say the answer comes from the cached list even when that list is not `stale`
 
 ### Requirement: The ask skill answers from the context document only
 The skill SHALL tell the session to answer the question in `$ARGUMENTS` from that document only, and with no question to give a status rundown: open pull requests with their `ready` and `blockers`, the items that need the owner, and the Next items. It SHALL tell the session to report `ready` and `blockers` as printed, to say when the pull request list is unobserved or stale and why, and to run no other command to fill a gap.

@@ -629,7 +629,9 @@ unregistered repo, runs the plugin's own CLI, and never blocks a session.
 Skills: `/dial:handoff [<repo>] [<change>]` writes five lines of the session
 into the note through `dial handoff`; `/dial:next [--vault <name>]` shows
 `dial next` as drafted actions; `/dial:ask [<question>]` syncs the repo
-with `--remote`, reads `dial context` and answers the question from it.
+with `--remote --json`, reads `dial context` and answers the question from it.
+A refresh that failed (the sync row's `remote` is `unobserved`) is reported,
+and the answer is then from the cached list.
 
 Sandbox note for the skills: `dial handoff` and `dial sync` write into the
 vault and the Dial home, so in a sandboxed Claude Code session both the vault

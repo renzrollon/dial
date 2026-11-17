@@ -163,7 +163,7 @@ Exit codes follow the one-reason-line rule with no exception (compound note N5, 
 
 `skills/ask/SKILL.md`, frontmatter `name: ask`, `argument-hint: "[<question>]"`, `allowed-tools: Bash(dial sync:*), Bash(dial context:*)`.
 
-1. Run `dial sync <repo> --remote`. If it fails, say so in one line and go on.
+1. Run `dial sync <repo> --remote --json`. If it fails, say so in one line and go on. If the row's `remote` is `unobserved`, the refresh failed: say so with the reason, and that the list is the cached one (D24).
 2. Run `dial context <repo> --json`.
 3. Answer `$ARGUMENTS` from that document only. With no question, give the rundown: open pull requests with `ready` and `blockers`, items with `needsMe`, the Next items.
 
@@ -185,6 +185,7 @@ Each has a reader that pins it, and each gets a task: the usage text and option 
 - [GitLab list fields are verified against the API documentation, not a live GitLab] → A missing `detailed_merge_status` (GitLab before 15.6) gives `unknown`, never `yes`. H1 pins a real reply.
 - [GitHub computes mergeability lazily; a first list can say `UNKNOWN`] → `ready` is `unknown` and the next sync settles it. The skill reports `unknown` as printed.
 - [A list that keeps failing is easy to miss: sync still exits 0] → `dial context` prints `last list failed: <reason>` and the age of the list it kept; the skill is told to say both.
+- [A failed fetch is easy to miss: sync still exits 0, the cache stays byte for byte, and a list under `remoteIntervalMinutes` is not `stale`] → `dial sync --json` carries the run's `remote` fact per repo; the skill runs the sync with `--json` and reports an `unobserved` `remote` as a failed refresh, with its reason (D24).
 - [Every `/dial:ask` runs a full sync, which rewrites the repo's notes when something changed] → That is what `dial sync` does everywhere else, and the background agent runs it every `syncIntervalMinutes` anyway.
 - [On a detached HEAD the list is not refreshed (D17)] → The age and `stale` flag say so.
 - [A fresh fetch and a cached read word their `pr` and `ci` evidence differently, so a remote sync followed by a plain sync rewrites the note (compound note N4, open since `build-the-dial-ledger`); each `/dial:ask` adds one such cycle] → Not fixed here (D23). This change adds no new difference, because the list reaches no note, and the fix would reword existing evidence that the living `remote-sources` spec pins. Flagged for its own change.

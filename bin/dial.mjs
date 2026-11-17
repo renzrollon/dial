@@ -241,7 +241,7 @@ function syncLines(result) {
 /** The JSON row of one synced repo. */
 function syncRow(result) {
   if (!result.ok) return { repo: result.repo, skipped: result.reason }
-  return { repo: result.repo, vault: result.vault, items: result.items, needsMe: result.needsMe, writes: result.writes }
+  return { repo: result.repo, vault: result.vault, items: result.items, needsMe: result.needsMe, writes: result.writes, remote: result.remote }
 }
 
 /** A summary that failed to build is the run's failure; a dry run prints its planned line. */

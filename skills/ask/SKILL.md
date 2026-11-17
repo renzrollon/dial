@@ -9,7 +9,9 @@ allowed-tools: Bash(dial sync:*), Bash(dial context:*)
 
 Answer `$ARGUMENTS` about the repository this session is working in, from what Dial observed and nothing else. The repo is that repository by name or path, unless the question names another registered repo.
 
-1. Run `dial sync <repo> --remote`. When it fails, say so in one line (the command and its error) and go on: the next step still reads the cached list.
+1. Run `dial sync <repo> --remote --json`. When it fails, say so in one line (the command and its error) and go on: the next step still reads the cached list.
+
+   A sync that exits 0 can still have failed to refresh: a failed fetch keeps the cache, and so the cached pull request list, as it was. Read the `remote` field of the repo's row. When it carries `unobserved`, the refresh failed: say so in one line with that reason, and say the answer comes from the cached list and may be out of date, even when the list is not `stale`.
 
 2. Run `dial context <repo> --json`.
 
@@ -18,7 +20,7 @@ Answer `$ARGUMENTS` about the repository this session is working in, from what D
 ## When the list is not fresh
 
 - A pull request list that is `unobserved` is the answer: say it was not observed and give its reason. Do not run `gh` or `glab` to fill the gap, and do not guess from branch names.
-- A list marked `stale`, or a held `error` from a failed list, is reported with its age and the reason. Say the answer comes from the cached list and may be out of date.
+- A list marked `stale`, a held `error` from a failed list, or a sync whose `remote` is `unobserved` (step 1) is reported with the list's age and the reason. Say the answer comes from the cached list and may be out of date.
 
 ## With no question
 
