@@ -4,6 +4,8 @@
 
 The Claude Code session behind a `dial voice` conversation: how it is started and kept apart from the owner's own Claude Code setup, the commands it may run, the prompt it carries, how its event stream becomes reply text, and how a turn is bounded, stopped and resumed.
 
+The session manager is `lib/voice/engine.mjs`. It starts and ends the `claude` process through the line-by-line child runner `lib/spawn.mjs`.
+
 ## ADDED Requirements
 
 ### Requirement: A conversation is one claude process fed over a stream

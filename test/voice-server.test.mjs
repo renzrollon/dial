@@ -642,7 +642,7 @@ test('the turn length is read from the limits: 500 characters is 202 and 501 is 
   assert.equal(page.of('user').length, 1)
 })
 
-test('a body larger than 4 x voiceTurnChars + 1024 bytes is answered 413 with the same reason and nothing is written', T, async () => {
+test('a body larger than 6 x voiceTurnChars + 1024 bytes is answered 413 with the same reason and nothing is written', T, async () => {
   const r = rig({ limits: { voiceTurnChars: 100 } })
   await r.up()
   const page = await r.connect()
@@ -655,6 +655,19 @@ test('a body larger than 4 x voiceTurnChars + 1024 bytes is answered 413 with th
   assert.equal(split.json().reason, 'turn longer than 100 characters')
   assert.equal(page.of('user').length, 0)
   assert.deepEqual(r.claudes()[0].written, [])
+})
+
+test('a turn at the character cap whose JSON escapes every character still fits the body limit', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  const text = 'a' + '\u0001'.repeat(1998) + 'z'
+  const body = J({ text })
+  assert.ok(Buffer.byteLength(body) > 4 * 2000 + 1024)
+  const res = await r.post('/turn', body)
+  assert.equal(res.status, 202)
+  await settle()
+  assert.equal(page.of('user').length, 1)
 })
 
 test('a body that is not a turn is 400 and nothing is written to the session', T, async () => {

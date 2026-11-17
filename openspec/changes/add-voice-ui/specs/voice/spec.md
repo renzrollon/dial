@@ -4,6 +4,8 @@
 
 The `dial voice` command: a loopback page the owner opens, leaves open and closes, that takes spoken or typed turns, shows and speaks the replies, and keeps both the listener and the owner's speech on this machine.
 
+The server, its routes, the event stream and the close timer are in `lib/voice/server.mjs`; the request check in `lib/voice/guard.mjs`; the sentence segmenter and spoken form in `lib/voice/segment.mjs`; the `say` queue in `lib/voice/speech.mjs`.
+
 ## ADDED Requirements
 
 ### Requirement: voice runs in the foreground until it is closed

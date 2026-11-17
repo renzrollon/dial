@@ -77,6 +77,20 @@ test('a missing or wrong token on the event stream or a POST is 403 missing or w
   }
 })
 
+// The token is compared by bytes: a token of the right character count in multi-byte
+// characters has a longer buffer and is refused 403, never thrown as a 500.
+test('a multi-byte token of the right character count is 403, not a throw', () => {
+  const reason = 'missing or wrong token'
+  const wide = '\u00e9'.repeat(TOKEN.length)
+  assert.equal(wide.length, TOKEN.length)
+  refusal(req({ method: 'GET', url: `/events?t=${encodeURIComponent(wide)}` }), 403, reason)
+  refusal(req({ method: 'GET', url: `/events?t=${'%C3%A9'.repeat(TOKEN.length)}` }), 403, reason)
+  refusal(req({ method: 'GET', url: `/events?t=${encodeURIComponent('\u{1F600}'.repeat(TOKEN.length / 2))}` }), 403, reason)
+  for (const path of ['/turn', '/interrupt', '/quit']) {
+    refusal(req({ url: path, headers: { 'x-dial-token': wide } }), 403, reason)
+  }
+})
+
 test('a POST with the token only in the query string is refused', () => {
   refusal(req({ url: `/turn?t=${TOKEN}`, headers: { 'x-dial-token': undefined } }), 403, 'missing or wrong token')
 })

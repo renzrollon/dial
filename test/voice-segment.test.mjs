@@ -149,6 +149,16 @@ test('one unbroken token is cut at 300 characters at once and the rest waits', (
   assert.deepEqual(seg.flush(), ['x'.repeat(50)])
 })
 
+test('a hard cut never splits a surrogate pair', () => {
+  const seg = createSegmenter()
+  const text = 'x'.repeat(299) + '\u{1F600}' + 'y'.repeat(10)
+  const early = seg.push(text)
+  assert.deepEqual(early, ['x'.repeat(299)])
+  const all = [...early, ...seg.flush()]
+  assert.deepEqual(all, ['x'.repeat(299), '\u{1F600}' + 'y'.repeat(10)])
+  for (const sentence of all) assert.ok(sentence.isWellFormed(), sentence)
+})
+
 test('a long run is cut however it arrives, and nothing is lost', () => {
   const text = Array.from({ length: 90 }, (_, i) => `word${i}`).join(' ')
   for (const pieces of [[text], [...text]]) {

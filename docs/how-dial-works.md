@@ -19,8 +19,9 @@ stage touches a vault.
 | forge cache | `$DIAL_HOME/cache/remote/<repo>.json`, the last PR and CI reply |
 
 Only `--remote` (or `--due-remote`, when the cache is older than
-`remoteIntervalMinutes`) runs `gh` or `glab` and refreshes that cache. Every
-other run is offline.
+`remoteIntervalMinutes`) runs `gh` or `glab` and refreshes that cache. The other
+reads stay offline. `dial voice` is the exception: it starts a Claude Code
+session, which talks to Anthropic's API.
 
 ### The fact discipline
 

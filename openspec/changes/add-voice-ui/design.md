@@ -228,7 +228,7 @@ export function createController({ Recognition, post, connect, timers, view })
 
 `timers` is `{ setTimeout, clearTimeout, setInterval, clearInterval }` and defaults to the globals. `uuid` defaults to `crypto.randomUUID`. `req` is any readable stream with `method`, `url` and `headers`; `res` needs `writeHead`, `write`, `end` and a `close` event, so a test passes plain objects.
 
-How the server joins the parts: an engine `text` goes through the segmenter; each sentence is sent as a `sentence` event and its `speakable` form, when not empty, goes to the speaker. `flush` flushes the segmenter. `end` with `stopped` false flushes; with `stopped` true it resets the segmenter and stops the speaker. The state is computed from `engine.refused`, `speaker.busy` and `engine.busy` after every event and sent when it changed. A `POST /turn` body is read up to 4 × `voiceTurnChars` + 1024 bytes; a longer one is answered 413 with the same reason as a turn that is too long.
+How the server joins the parts: an engine `text` goes through the segmenter; each sentence is sent as a `sentence` event and its `speakable` form, when not empty, goes to the speaker. `flush` flushes the segmenter. `end` with `stopped` false flushes; with `stopped` true it resets the segmenter and stops the speaker. The state is computed from `engine.refused`, `speaker.busy` and `engine.busy` after every event and sent when it changed. A `POST /turn` body is read up to 6 × `voiceTurnChars` + 1024 bytes, since JSON escapes one character to at most six bytes; a longer one is answered 413 with the same reason as a turn that is too long.
 
 ### 14. Testing (D20)
 
