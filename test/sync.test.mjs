@@ -500,7 +500,8 @@ test('--remote fetches the PR and its checks once each and writes the cache', ()
   const s = setup({ table: ghTable })
   const r = s.run({ remote: true })
   assert.equal(r.ok, true)
-  assert.deepEqual(ghCalls(s.exec).map(c => c.args.slice(0, 2).join(' ')), ['pr view', 'pr checks'])
+  // remote-sources, "A remote sync lists the open pull requests": a complete fetch makes one more call, the list.
+  assert.deepEqual(ghCalls(s.exec).map(c => c.args.slice(0, 2).join(' ')), ['pr view', 'pr checks', 'pr list'])
   assert.ok(ghCalls(s.exec).every(c => c.opts.cwd === s.paths.katipon))
   const cached = readCache(s.home, 'katipon')
   assert.equal(cached.data.fetchedAt, '2026-11-10T09:00:00.000Z')
@@ -518,14 +519,15 @@ test('--remote with --dry-run fetches but writes no cache and no home', () => {
 test('--due-remote fetches when there is no cache, skips a fresh one and fetches a stale one', () => {
   const s = setup({ table: ghTable })
   s.run({ dueRemote: true })
-  assert.equal(ghCalls(s.exec).length, 2, 'no cache: fetch')
+  // remote-sources, "A remote sync lists the open pull requests": each complete fetch is view, checks and list.
+  assert.equal(ghCalls(s.exec).length, 3, 'no cache: fetch')
   assert.ok(existsSync(cacheFile(s)))
 
   s.run({ dueRemote: true, now: new Date('2026-11-10T09:10:00Z') })
-  assert.equal(ghCalls(s.exec).length, 2, 'fetched 10 minutes ago with a 30 minute interval: cache only')
+  assert.equal(ghCalls(s.exec).length, 3, 'fetched 10 minutes ago with a 30 minute interval: cache only')
 
   s.run({ dueRemote: true, now: new Date('2026-11-10T09:45:00Z') })
-  assert.equal(ghCalls(s.exec).length, 4, 'fetched 45 minutes ago: fetch')
+  assert.equal(ghCalls(s.exec).length, 6, 'fetched 45 minutes ago: fetch')
   assert.equal(readCache(s.home, 'katipon').data.fetchedAt, '2026-11-10T09:45:00.000Z')
 })
 
@@ -534,7 +536,8 @@ test('a gitlab repo is fetched with glab only', () => {
   s.registry.repos[0].host = 'gitlab'
   s.run({ remote: true })
   assert.equal(ghCalls(s.exec).length, 0)
-  assert.equal(s.exec.calls.filter(c => c.file === 'glab').length, 2)
+  // remote-sources, "A remote sync lists the open pull requests" ("GitLab list"): mr view, ci status, mr list.
+  assert.equal(s.exec.calls.filter(c => c.file === 'glab').length, 3)
 })
 
 test('a failed fetch keeps the sync at ok and the note on the cached facts', () => {

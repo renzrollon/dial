@@ -1,0 +1,25 @@
+[
+  {
+    "iid": 12,
+    "title": "Add login",
+    "source_branch": "feat/add-login",
+    "target_branch": "main",
+    "web_url": "https://gitlab.example/team/api/-/merge_requests/12",
+    "author": { "username": "caro" },
+    "draft": false,
+    "has_conflicts": false,
+    "detailed_merge_status": "not_approved",
+    "updated_at": "2026-11-09T22:10:00Z"
+  },
+  {
+    "iid": 15,
+    "title": "Wip thing",
+    "source_branch": "wip/thing",
+    "target_branch": "main",
+    "web_url": "https://gitlab.example/team/api/-/merge_requests/15",
+    "author": { "username": "caro" },
+    "work_in_progress": true,
+    "has_conflicts": true,
+    "updated_at": "2026-11-10T01:00:00Z"
+  }
+]

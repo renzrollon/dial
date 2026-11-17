@@ -9,6 +9,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { formatResult, install, status, uninstall } from '../lib/agent.mjs'
 import { brief, formatBrief, hookEnvelope } from '../lib/brief.mjs'
+import { context, formatContext } from '../lib/context.mjs'
 import { diagnose, formatDoctor } from '../lib/doctor.mjs'
 import { ensureHome, HomeUnwritable, resolveHome } from '../lib/home.mjs'
 import { effectiveLimits, formatLimits } from '../lib/limits.mjs'
@@ -42,6 +43,8 @@ Commands:
   next [--vault <name>]        every item that needs you, across repos, offline (--json)
   brief [<repo>] [--hook] [--session <id>]
                                the short orientation for one repo, offline (--json)
+  context [<repo>]             open pull requests with their readiness, items, Next and narrative for one repo,
+                               offline (--json)
   handoff <repo> [<change>] (--stdin | --text <t>) [--source <label>] [--next <text>]...
                                prepend a dated narrative entry to a note (--json)
   narrate <repo> [<change>] --transcript <path> [--turns <n>] [--dry-run], or narrate --eval <dir>
@@ -75,6 +78,7 @@ const COMMANDS = {
   sync: { options: { all: 'flag', remote: 'flag', 'due-remote': 'flag', 'dry-run': 'flag', json: 'flag' }, args: 1 },
   next: { options: { vault: 'value', json: 'flag' }, args: 0 },
   brief: { options: { hook: 'flag', session: 'value', json: 'flag' }, args: 1 },
+  context: { options: { json: 'flag' }, args: 1 },
   handoff: { options: { stdin: 'flag', text: 'value', source: 'value', next: 'list', json: 'flag' }, args: 2 },
   narrate: { options: { transcript: 'value', turns: 'value', 'dry-run': 'flag', eval: 'value', json: 'flag' }, args: 2 },
   record: { options: { event: 'value', json: 'flag' }, args: 0 },
@@ -237,7 +241,7 @@ function syncLines(result) {
 /** The JSON row of one synced repo. */
 function syncRow(result) {
   if (!result.ok) return { repo: result.repo, skipped: result.reason }
-  return { repo: result.repo, vault: result.vault, items: result.items, needsMe: result.needsMe, writes: result.writes }
+  return { repo: result.repo, vault: result.vault, items: result.items, needsMe: result.needsMe, writes: result.writes, remote: result.remote }
 }
 
 /** A summary that failed to build is the run's failure; a dry run prints its planned line. */
@@ -506,6 +510,19 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
       if (options.hook) out(`${hookEnvelope(result.lines)}\n`)
       else if (options.json) out(json({ repo: result.repo, lines: result.lines, dropped: result.dropped }))
       else out(`${formatBrief(result)}\n`)
+      return 0
+    }
+
+    case 'context': {
+      const now = clockOf(env)
+      const [arg = cwd] = positionals
+      const registry = loadOrRefuse(home)
+      const limits = limitsOrRefuse(registry, home)
+      const entry = entryFor(registry, arg, cwd)
+      if (!entry) throw new Refusal(`${arg} is not a registered repo`)
+      const result = context({ registry, arg: entry.name, limits, env, now, home })
+      if (!result.ok) throw new Refusal(result.reason)
+      out(options.json ? json(result.doc) : `${formatContext(result.doc, { contextLines: limits.contextLines })}\n`)
       return 0
     }
 

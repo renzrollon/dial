@@ -179,7 +179,7 @@ async function updateSettings(reg, home) {
   const allow = settings.permissions?.allow ?? []
   if (allow.includes(PERMISSION)) {
     console.log(`  ${PERMISSION} is already allowed.`)
-  } else if (await confirm(`Allow ${PERMISSION} so /dial:handoff and /dial:next don't prompt?`, true)) {
+  } else if (await confirm(`Allow ${PERMISSION} so /dial:handoff, /dial:next and /dial:ask don't prompt?`, true)) {
     settings.permissions = { ...(settings.permissions ?? {}), allow: [...allow, PERMISSION] }
     changed = true
   }

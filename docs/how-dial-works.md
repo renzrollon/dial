@@ -87,8 +87,9 @@ plan. Notes carry metadata only: states, counts, names, short evidence.
 
 The vault is the surface. Obsidian shows `Dial.base` (four views by state
 priority) and `Dial Summary.md`; the terminal shows `dial next` (every
-needs-me item, offline) and `dial brief` (at most `briefLines` lines for one
-repo). `dial report` reads the notes, the sync log and the daily log and prints
+needs-me item, offline), `dial brief` (at most `briefLines` lines for one
+repo) and `dial context` (one repo's open pull requests with a ready verdict,
+items, Next and narrative, offline); `/dial:ask` answers a question from it. `dial report` reads the notes, the sync log and the daily log and prints
 indicators with their denominators, and `dial review --week` writes the weekly
 review asking archive, drop or re-spec of each stale item. A human or an agent
 adds meaning through `dial handoff` (a narrative entry and `- [ ]` lines) and
