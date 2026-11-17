@@ -18,11 +18,15 @@ The binary SHALL print its usage text to stdout and exit 0 when invoked with no 
 
 #### Scenario: Usage names every command and environment variable
 - **WHEN** usage is printed
-- **THEN** it contains one line for each of the nineteen commands `version`, `limits`, `doctor`, `register`, `unregister`, `repos`, `help`, `vault`, `sync`, `next`, `brief`, `handoff`, `narrate`, `record`, `drop`, `agent`, `watch`, `report` and `review`, and its `Environment:` line names `DIAL_HOME`, `DIAL_NOW`, `DIAL_LAUNCHCTL_BIN`, `DIAL_DEADLINE_MS`, `ESCAPEMENT_HOME` and `ESCAPEMENT_CHECKPOINT_URL`
+- **THEN** it contains one line for each of the twenty commands `version`, `limits`, `doctor`, `register`, `unregister`, `repos`, `help`, `vault`, `sync`, `next`, `brief`, `context`, `handoff`, `narrate`, `record`, `drop`, `agent`, `watch`, `report` and `review`, and its `Environment:` line names `DIAL_HOME`, `DIAL_NOW`, `DIAL_LAUNCHCTL_BIN`, `DIAL_DEADLINE_MS`, `ESCAPEMENT_HOME` and `ESCAPEMENT_CHECKPOINT_URL`
 
 #### Scenario: Usage names the subcommands
 - **WHEN** usage is printed
 - **THEN** the `vault` line names `init` and the `agent` line names `install`, `uninstall` and `status`
+
+#### Scenario: The context line follows the brief line
+- **WHEN** usage is printed
+- **THEN** the line for `context` comes directly after the line for `brief` and names `[<repo>]` and `--json`
 
 ### Requirement: The version is a command and a flag
 The binary SHALL print the package version when invoked as `dial version` or `dial --version`, and SHALL exit 0.
@@ -81,7 +85,7 @@ When a command fails, the binary SHALL exit 1 and write exactly one line to stde
 - **THEN** stderr is exactly one line `dial: 2 of 3 vaults not reviewed: <first reason>` and the exit code is 1
 
 ### Requirement: Read commands offer JSON output
-Every command that reads or reports state — `version`, `limits`, `repos`, `doctor`, `next`, `brief`, `sync`, `vault init`, `handoff`, `narrate`, `record`, `drop`, `agent status`, `report` and `review` — SHALL accept `--json`. With `--json`, stdout SHALL be a single JSON document indented by two spaces and followed by one newline, and the exit code SHALL be the same as in text mode. Any other command or subcommand SHALL refuse `--json` as an unknown option.
+Every command that reads or reports state — `version`, `limits`, `repos`, `doctor`, `next`, `brief`, `context`, `sync`, `vault init`, `handoff`, `narrate`, `record`, `drop`, `agent status`, `report` and `review` — SHALL accept `--json`. With `--json`, stdout SHALL be a single JSON document indented by two spaces and followed by one newline, and the exit code SHALL be the same as in text mode. Any other command or subcommand SHALL refuse `--json` as an unknown option.
 
 #### Scenario: JSON is pretty-printed and parseable
 - **WHEN** `dial repos --json` is run
@@ -98,6 +102,10 @@ Every command that reads or reports state — `version`, `limits`, `repos`, `doc
 #### Scenario: A command without JSON output refuses the flag
 - **WHEN** `dial watch --json` or `dial agent install --json` is run
 - **THEN** stdout is empty, stderr is `dial: unknown option: --json`, and the exit code is 1
+
+#### Scenario: context accepts --json and no other option
+- **WHEN** `dial context katipon --json` and `dial context katipon --hook` are run
+- **THEN** the first prints one two-space-indented JSON document ending with a newline and exits 0, and the second exits 1 with `dial: unknown option: --hook`
 
 ### Requirement: The vault and agent commands dispatch on a subcommand
 `vault` SHALL take the subcommand `init`, and `agent` SHALL take `install`, `uninstall` or `status`, as the first positional argument after the command. A missing subcommand SHALL be refused with `dial: vault needs one of init` or `dial: agent needs one of install, uninstall, status`; an unrecognised one with `dial: unknown vault subcommand: <x>` or `dial: unknown agent subcommand: <x>`. Each refusal exits 1 with empty stdout. Options are checked against the subcommand.

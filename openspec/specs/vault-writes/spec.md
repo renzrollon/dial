@@ -44,7 +44,7 @@ When and how Dial writes into a registered vault: `dial vault init`, `dial sync`
 - **THEN** stderr is `dial: vault personal does not exist: /Users/caro/Documents/gone`, the exit code is 1, and the directory is not created
 
 ### Requirement: sync runs the pipeline for each selected repo and reports the outcome
-`dial sync <repo>` SHALL sync the one registered repo the argument resolves to under the registry's repo resolution rule, and `dial sync --all` every registered repo, each collecting, deriving, rendering and writing its notes and appending daily lines, then printing `<repo>: <items> items, <needsMe> need me, <n> written`. `--json` SHALL print an array of `{ repo, vault, items, needsMe, writes: [{ verb, path }] }`.
+`dial sync <repo>` SHALL sync the one registered repo the argument resolves to under the registry's repo resolution rule, and `dial sync --all` every registered repo, each collecting, deriving, rendering and writing its notes and appending daily lines, then printing `<repo>: <items> items, <needsMe> need me, <n> written`. `--json` SHALL print an array of `{ repo, vault, items, needsMe, writes: [{ verb, path }], remote }`, where `remote` is the run's `remote` fact: `{ value, evidence }` when the remote facts came from a completed fetch or a readable cache, else `{ value: null, unobserved }` with the fact's reason, redacted as the vault writers redact with the repo name kept. A fetch that fails leaves the exit code 0, so under `--remote` an unobserved `remote` is the row's sign that the refresh failed.
 
 #### Scenario: One repo
 - **WHEN** `dial sync katipon` runs and katipon has three items, one needing the human, and two notes differ from disk
@@ -73,6 +73,14 @@ When and how Dial writes into a registered vault: `dial vault init`, `dial sync`
 #### Scenario: Due remote
 - **WHEN** `dial sync --all --due-remote` runs and a repo's remote cache was fetched 45 minutes ago with `remoteIntervalMinutes` 30
 - **THEN** that repo is synced as if `--remote` had been given, and a repo whose cache is 10 minutes old is synced from its cache
+
+#### Scenario: A failed fetch shows in the JSON row
+- **WHEN** `dial sync katipon --remote --json` runs, `gh pr view` fails with `error connecting to api.github.com`, and the remote cache holds a list fetched 10 minutes ago
+- **THEN** the exit code is 0, the cache is byte for byte as it was, and the row's `remote` is `{ "value": null, "unobserved": "gh: error connecting to api.github.com" }`
+
+#### Scenario: A completed fetch shows in the JSON row
+- **WHEN** `DIAL_NOW=2026-11-10T09:00:00Z dial sync katipon --remote --json` runs and the fetch completes
+- **THEN** the row's `remote` is `{ "value": "ok", "evidence": "remote cache: fetched 2026-11-10T09:00:00.000Z" }`
 
 ### Requirement: A dry run prints every planned write and writes nothing
 `dial sync … --dry-run` SHALL print one line `<verb> <absolute path>` per planned path, the verb one of `create`, `update`, `unchanged`, `append`, `move`, with a move printed as `move <from> → <to>`, and SHALL write nothing: no vault file, no folder, no cache file, no sync log line, and no home directory.

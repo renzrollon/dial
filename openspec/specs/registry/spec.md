@@ -188,11 +188,15 @@ When present, `narrate` SHALL be a JSON object, else every reading command exits
 - **THEN** each command's stdout is byte-identical across the two runs and the exit code is 0 both times
 
 ### Requirement: A repo argument or a working directory resolves to at most one registered repo
-`sync <repo>`, `brief`, `handoff`, `narrate`, `drop`, `record` and the four hook scripts SHALL resolve a repo through one rule. An argument equal to a registered repo's name SHALL resolve to that repo. Otherwise the argument SHALL be read as a path (`~` expanded, made absolute), and it SHALL resolve to the registered repo whose path equals it or contains it segment by segment. When more than one registered path contains it, the longest SHALL win.
+`sync <repo>`, `brief`, `context`, `handoff`, `narrate`, `drop`, `record` and the four hook scripts SHALL resolve a repo through one rule. An argument equal to a registered repo's name SHALL resolve to that repo. Otherwise the argument SHALL be read as a path (`~` expanded, made absolute), and it SHALL resolve to the registered repo whose path equals it or contains it segment by segment. When more than one registered path contains it, the longest SHALL win.
 
 #### Scenario: A sibling with a shared prefix does not match
 - **WHEN** katipon is registered at `/Users/caro/IdeaProjects/katipon` and the argument is `/Users/caro/IdeaProjects/katipon-old`
 - **THEN** no repo is resolved
+
+#### Scenario: context resolves a subdirectory to its repo
+- **WHEN** katipon is registered at `/Users/caro/IdeaProjects/katipon` and `dial context /Users/caro/IdeaProjects/katipon/lib --json` is run
+- **THEN** the document's `repo` is `katipon`
 
 ### Requirement: Repo paths are compared through their real paths
 Repo resolution SHALL compare the argument and every registered path through their real paths (symlinks resolved), and also lexically, so a symlinked registration matches a physical working directory and a path that no longer exists still matches its stored form.

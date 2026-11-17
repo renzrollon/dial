@@ -1,6 +1,6 @@
 {
   "name": "dial",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Registers repositories against exactly one Obsidian vault each and keeps the work/personal boundary sound.",
   "type": "module",
   "license": "MIT",
