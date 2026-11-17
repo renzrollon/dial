@@ -19,8 +19,9 @@ stage touches a vault.
 | forge cache | `$DIAL_HOME/cache/remote/<repo>.json`, the last PR and CI reply |
 
 Only `--remote` (or `--due-remote`, when the cache is older than
-`remoteIntervalMinutes`) runs `gh` or `glab` and refreshes that cache. Every
-other run is offline.
+`remoteIntervalMinutes`) runs `gh` or `glab` and refreshes that cache. The other
+reads stay offline. `dial voice` is the exception: it starts a Claude Code
+session, which talks to Anthropic's API.
 
 ### The fact discipline
 
@@ -89,7 +90,7 @@ The vault is the surface. Obsidian shows `Dial.base` (four views by state
 priority) and `Dial Summary.md`; the terminal shows `dial next` (every
 needs-me item, offline), `dial brief` (at most `briefLines` lines for one
 repo) and `dial context` (one repo's open pull requests with a ready verdict,
-items, Next and narrative, offline); `/dial:ask` answers a question from it. `dial report` reads the notes, the sync log and the daily log and prints
+items, Next and narrative, offline); `/dial:ask` answers a question from it. `dial voice` is the spoken form of the same answers: a loopback window where a Claude Code session limited to `dial next`, `dial context`, `dial brief`, `dial sync` and `dial repos` answers aloud. `dial report` reads the notes, the sync log and the daily log and prints
 indicators with their denominators, and `dial review --week` writes the weekly
 review asking archive, drop or re-spec of each stale item. A human or an agent
 adds meaning through `dial handoff` (a narrative entry and `- [ ]` lines) and

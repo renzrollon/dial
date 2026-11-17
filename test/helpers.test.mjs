@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
-import { FIXTURES, fakeBinary, fakeExec, fakeFetch, frozenNow, makeRepo, tmp } from './helpers.mjs'
+import { FIXTURES, fakeBinary, fakeExec, fakeFetch, fakeSpawn, fakeTimers, frozenNow, makeRepo, tmp } from './helpers.mjs'
 
 test('makeRepo builds the declared tree', () => {
   const root = makeRepo(join(tmp(), 'r'), {
@@ -66,4 +66,59 @@ test('every facts fixture parses and carries the envelope and the RepoFacts sour
     assert.deepEqual(Object.keys(fx).sort(), ['expect', 'facts', 'limits', 'notes', 'now'], name)
     assert.deepEqual(Object.keys(fx.facts), ['repo', 'git', 'openspec', 'interlock', 'escapement', 'sessions', 'remote'], name)
   }
+})
+
+test('fakeSpawn records each call and drives lines and the exit', () => {
+  const { spawn, children } = fakeSpawn()
+  const lines = []
+  const exits = []
+  const h = spawn('claude', ['-p'], { cwd: '/w', env: { A: '1' }, onLine: l => lines.push(l), onExit: r => exits.push(r) })
+  spawn('say', [], {})
+  assert.equal(children.length, 2)
+  const [c] = children
+  assert.deepEqual([c.file, c.args, c.cwd, c.env], ['claude', ['-p'], '/w', { A: '1' }])
+  assert.equal(h.write('a\n'), true)
+  assert.equal(h.write('b'), true)
+  c.line('x')
+  c.line('y')
+  assert.deepEqual([c.written, lines], [['a\n', 'b'], ['x', 'y']])
+  assert.equal(c.ended, false)
+  h.end()
+  assert.equal(c.ended, true)
+  assert.equal(h.write('c'), false)
+  h.kill()
+  h.kill()
+  assert.deepEqual([c.killed, c.kills, exits.length], [true, 2, 0])
+  c.exit({ signal: 'SIGTERM', stderr: 'bye' })
+  c.exit({ code: 9 })
+  c.line('late')
+  assert.deepEqual(exits, [{ code: 0, signal: 'SIGTERM', stderr: 'bye', error: null }])
+  assert.deepEqual([lines, c.written], [['x', 'y'], ['a\n', 'b']])
+  assert.equal(h.write('d'), false)
+  assert.notEqual(children[0].pid, children[1].pid)
+})
+
+test('fakeTimers runs due timeouts and intervals in time order and honours clear', () => {
+  const { timers, advance } = fakeTimers()
+  const log = []
+  timers.setTimeout(() => log.push('t300'), 300)
+  timers.setTimeout(() => log.push('t100'), 100)
+  const cancelled = timers.setTimeout(() => log.push('never'), 150)
+  const every = timers.setInterval(() => log.push('i200'), 200)
+  timers.setTimeout(() => {
+    log.push('t50')
+    timers.setTimeout(() => log.push('nested120'), 70)
+  }, 50)
+  timers.clearTimeout(cancelled)
+  advance(99)
+  assert.deepEqual(log, ['t50'])
+  advance(1)
+  assert.deepEqual(log, ['t50', 't100'])
+  advance(200)
+  assert.deepEqual(log, ['t50', 't100', 'nested120', 'i200', 't300'])
+  advance(400)
+  assert.deepEqual(log.slice(5), ['i200', 'i200'])
+  timers.clearInterval(every)
+  advance(1000)
+  assert.equal(log.length, 7)
 })

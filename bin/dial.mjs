@@ -4,8 +4,8 @@
  * stderr writer and the exit code; everything else is in `lib/`, which never
  * touches the process.
  */
-import { readFileSync, realpathSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { formatResult, install, status, uninstall } from '../lib/agent.mjs'
 import { brief, formatBrief, hookEnvelope } from '../lib/brief.mjs'
@@ -21,8 +21,11 @@ import {
   expandHome, listRepos, loadRegistry, register, registryPath, repoName, resolveRepo, unregister, writeRegistry,
 } from '../lib/registry.mjs'
 import { formatReport, report, reviewWeek } from '../lib/report.mjs'
+import { findOnPath, spawnChild } from '../lib/spawn.mjs'
 import { syncAll, syncRepo } from '../lib/sync.mjs'
 import { dropNote, vaultInit } from '../lib/vault.mjs'
+import { newToken } from '../lib/voice/guard.mjs'
+import { createVoice, listenLoopback, loadVoiceFiles } from '../lib/voice/server.mjs'
 import { watch } from '../lib/watch.mjs'
 
 const USAGE = `dial — a ledger of every repo's changes in Obsidian, one vault per repo, the work/personal boundary kept sound
@@ -55,6 +58,8 @@ Commands:
   agent install|uninstall|status
                                the background sync LaunchAgent (status: --json)
   watch                        sync a repo whenever its ship or OpenSpec state moves
+  voice [--port <n>] [--model <name>] [--say-voice <name>] [--lang <tag>] [--no-open]
+                               talk to Dial in a window: it listens, answers aloud and runs until closed
   report                       what the ledger shows over time (--json)
   review --week                write the weekly review of stale items into each vault (--json)
   help                         print this text (also --help after any command)
@@ -91,6 +96,7 @@ const COMMANDS = {
     },
   },
   watch: { options: {}, args: 0 },
+  voice: { options: { port: 'value', model: 'value', 'say-voice': 'value', lang: 'value', 'no-open': 'flag' }, args: 0 },
   report: { options: { json: 'flag' }, args: 0 },
   review: { options: { week: 'flag', json: 'flag' }, args: 0 },
   help: { options: {}, args: 0 },
@@ -410,7 +416,86 @@ async function runWatch({ env, out, err, home, signal }) {
   return 0
 }
 
-async function dispatch(command, sub, spec, { options, positionals }, { env, cwd, out, err, readStdin, fetch, signal, started }) {
+const VOICE_PORT = 3425
+const LANGUAGE_TAG = /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/
+const CONTROL = /[\u0000-\u001f\u007f]/
+
+/** A model or voice name: not blank, no control character, and nothing an option parser could read as a flag. */
+const isName = value => value.trim() !== '' && !value.trimStart().startsWith('-') && !CONTROL.test(value)
+
+/** A refused value as written, in JSON quotes when its ends are blank or it holds a control character. */
+const shown = value => (value.trim() !== value || CONTROL.test(value) ? JSON.stringify(value) : value)
+
+/** The options of `voice`, checked before anything is created, bound or started. */
+function voiceOptions(options) {
+  let port = VOICE_PORT
+  if (options.port !== undefined) {
+    const raw = options.port
+    if (!/^\d+$/.test(raw) || Number(raw) < 1024 || Number(raw) > 65535) throw new Refusal(`--port must be a number from 1024 to 65535: ${raw}`)
+    port = Number(raw)
+  }
+  const model = options.model ?? 'sonnet'
+  if (!isName(model)) throw new Refusal(`--model is not a model name: ${shown(model)}`)
+  const sayVoice = options['say-voice']
+  if (sayVoice !== undefined && !isName(sayVoice)) throw new Refusal(`--say-voice is not a voice name: ${shown(sayVoice)}`)
+  const lang = options.lang ?? 'en-US'
+  if (!LANGUAGE_TAG.test(lang)) throw new Refusal(`--lang is not a language tag: ${shown(lang)}`)
+  return { port, model, sayVoice, lang, noOpen: !!options['no-open'] }
+}
+
+/**
+ * `voice`: serve the page on 127.0.0.1, start the session, open the window, and run until SIGINT or SIGTERM (or
+ * the injected `signal`), a quit request, or the close timer. Exits 0, or 1 after the session was refused, whose
+ * line the server has already written.
+ */
+async function runVoice({ options }, { env, out, err, home, signal, spawn, listen, platform }) {
+  const { port, model, sayVoice, lang, noOpen } = voiceOptions(options)
+  for (const name of ['claude', 'dial']) if (findOnPath(env, name) === null) throw new Refusal(`${name} is not on PATH`)
+  const registry = loadForWrite(home)
+  const limits = limitsOrRefuse(registry, home)
+  ensureHome(env)
+  const cwd = join(home, 'voice')
+  try {
+    mkdirSync(cwd, { recursive: true })
+  } catch (error) {
+    throw new HomeUnwritable(cwd, error)
+  }
+  const files = loadVoiceFiles()
+  if (!files.ok) throw new Refusal(files.reason)
+
+  const voice = createVoice({
+    port, token: newToken(), lang, model, sayVoice,
+    limits: { voiceTurnSeconds: limits.voiceTurnSeconds, voiceCloseSeconds: limits.voiceCloseSeconds, voiceTurnChars: limits.voiceTurnChars },
+    cwd, env, prompt: files.prompt, assets: files.assets, spawn, platform, noOpen,
+    warn: line => err(`${line.startsWith('dial: ') ? line : `dial: ${line}`}\n`),
+  })
+  const listener = await listen(voice.handle, { port })
+  if (!listener.ok) {
+    if (listener.code === 'EADDRINUSE') throw new Refusal(`port ${port} is in use; another dial voice may be running`)
+    throw new Refusal(`cannot listen on 127.0.0.1:${port} (${listener.code}: ${listener.message})`)
+  }
+
+  const stop = () => {
+    voice.shutdown()
+  }
+  if (signal) signal.aborted ? stop() : signal.addEventListener('abort', stop, { once: true })
+  else {
+    process.on('SIGINT', stop)
+    process.on('SIGTERM', stop)
+  }
+  try {
+    out(`dial voice: ${voice.address}\n`)
+    voice.start()
+    return await voice.done
+  } finally {
+    if (signal) signal.removeEventListener('abort', stop)
+    process.removeListener('SIGINT', stop)
+    process.removeListener('SIGTERM', stop)
+    await listener.close()
+  }
+}
+
+async function dispatch(command, sub, spec, { options, positionals }, { env, cwd, out, err, readStdin, fetch, signal, started, spawn, listen, platform }) {
   if (positionals.length > spec.args) throw new Refusal(`unexpected argument: ${positionals[spec.args]}`)
   const home = resolveHome(env)
 
@@ -553,6 +638,9 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
     case 'watch':
       return runWatch({ env, out, err, home, signal })
 
+    case 'voice':
+      return runVoice({ options }, { env, out, err, home, signal, spawn, listen, platform })
+
     case 'report': {
       const now = clockOf(env)
       const result = report({ registry: loadOrRefuse(home), home, env, now })
@@ -602,11 +690,12 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
 /**
  * Entry point. Resolves to the exit code; never rejects and never calls
  * `process.exit`. `env`, `cwd`, `stdout`, `stderr`, `stdin` (a function
- * returning all of stdin as text) and `fetch` and `signal` (aborts `watch`) are injectable for tests.
+ * returning all of stdin as text), `fetch`, `signal` (aborts `watch` and `voice`), and the child runner `spawn`, the
+ * loopback `listen` and the `platform` of `voice` are injectable for tests.
  */
 export async function main(argv, {
   env = process.env, cwd = process.cwd(), stdout = process.stdout, stderr = process.stderr, stdin = readProcessStdin,
-  fetch = globalThis.fetch, signal,
+  fetch = globalThis.fetch, signal, spawn = spawnChild, listen = listenLoopback, platform = process.platform,
 } = {}) {
   const started = Date.now()
   const out = text => stdout.write(text)
@@ -638,7 +727,7 @@ export async function main(argv, {
     const parsed = parseArgs(spec, args)
     // A command line the parser refuses exits 1 for record too; only a failure of the run itself exits 0.
     if (command === 'record') failCode = 0
-    return await dispatch(command, sub, spec, parsed, { env, cwd, out, err, readStdin: stdin, fetch, signal, started })
+    return await dispatch(command, sub, spec, parsed, { env, cwd, out, err, readStdin: stdin, fetch, signal, started, spawn, listen, platform })
   } catch (error) {
     return fail(error && error.message ? error.message : String(error), failCode)
   }

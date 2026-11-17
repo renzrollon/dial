@@ -343,7 +343,10 @@ glab auth login        # GitLab repos
 dial sync my-repo --remote
 ```
 
-Without `--remote` or `--due-remote`, Dial makes no network calls. PR and CI
+Without `--remote` or `--due-remote`, Dial makes no network calls, with one
+exception: the Claude Code session of `dial voice` reaches Anthropic as your
+own Claude Code does, through your login and against your plan. Its listener
+is loopback only, and your speech audio stays on the machine. PR and CI
 fields show the cached reply, or `unobserved` when there is none. The
 LaunchAgent uses `--due-remote`, so it refreshes at most every
 `remoteIntervalMinutes` (30).
@@ -422,6 +425,8 @@ dial <command> [options]
   agent install|uninstall|status
                                the background sync LaunchAgent (status: --json)
   watch                        sync a repo whenever its ship or OpenSpec state moves
+  voice [--port <n>] [--model <name>] [--say-voice <name>] [--lang <tag>] [--no-open]
+                               talk to Dial in a window: it listens, answers aloud and runs until closed
   report                       what the ledger shows over time (--json)
   review --week                write the weekly review of stale items into each vault (--json)
   help                         print this text (also --help after any command)
@@ -480,6 +485,18 @@ accept it, and then print one two-space-indented JSON document.
   mtime every `watchPollSeconds` and syncs a repo whose mtime moved, printing
   `HH:mm synced <repo> (needs me <n>)`. The first poll only records mtimes.
   It runs until SIGINT, then exits 0. It takes no `--json`.
+- `voice` serves a page on `127.0.0.1:3425` (`--port` moves it), prints its
+  address with a token made new for each launch, and opens it in Chrome as an
+  app window on macOS (`--no-open` skips that). Turns are answered by a Claude
+  Code session (`--model`, default `sonnet`) that loads none of your Claude
+  Code setup and may run five commands only: `dial next`, `dial context`,
+  `dial brief`, `dial sync` and `dial repos`. Replies are shown sentence by
+  sentence and spoken with `say` (`--say-voice` picks the voice); without
+  `say` they are only shown. Speech is recognized on the device in `--lang`
+  (default `en-US`), or not at all, and typed turns always work. It ends on
+  Quit, on SIGINT or SIGTERM, or `voiceCloseSeconds` after its last window
+  closes, and exits 1 when the session was refused. It needs `claude` and
+  `dial` on `PATH` and takes no `--json`.
 
 ### Notes, anatomy
 
@@ -542,10 +559,11 @@ $DIAL_HOME/
   cache/remote/       <repo>.json, the last PR and CI reply per repo
   logs/               sync.jsonl, one line per synced repo; agent.out.log and agent.err.log
   eval/               items/, outputs/, labels.jsonl: the narrate quality set, made by hand
+  voice/              the working directory of the dial voice session; Dial writes no file in it
 ```
 
 The home is created by a writing command (`register`, `unregister`, `sync`,
-`handoff`, `agent install`, `watch`) and never by a read command. A missing
+`handoff`, `agent install`, `watch`, `voice`) and never by a read command. A missing
 registry is the empty registry. A home that cannot be written is refused with
 `dial: dial home is not writable: <path> (<OS code>)` before any vault file is
 touched.
@@ -605,6 +623,9 @@ its host.
 | `remotePullRequests` | 20 | open pull requests kept per repo by a remote sync |
 | `contextNarrative` | 5 | narrative entries dial context prints |
 | `contextLines` | 200 | maximum lines dial context prints as text |
+| `voiceTurnSeconds` | 120 | seconds before a voice turn is stopped |
+| `voiceCloseSeconds` | 10 | seconds dial voice stays up after its last window closes |
+| `voiceTurnChars` | 2000 | maximum characters in one voice turn |
 
 An unknown cap name or a non-positive-integer value is refused, naming the key
 and the file.
@@ -703,3 +724,5 @@ prints the full report.
 - Dial never deletes a note and never writes a diff, a file body or a secret.
 - Dial has no runtime dependencies; the only background process is the optional
   LaunchAgent.
+- `dial voice` is no daemon or app: it runs in the foreground, and needs
+  `claude` and `dial` on `PATH`.

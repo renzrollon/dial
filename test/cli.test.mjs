@@ -6,19 +6,23 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile, execFileSync, spawn } from 'node:child_process'
-import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { request as httpRequest } from 'node:http'
+import { createServer } from 'node:net'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { basename, dirname, join } from 'node:path'
+import { main } from '../bin/dial.mjs'
 import {
-  BIN, FIXTURES, fakeBinary, makeGitDir, makeHome, makeRepo, makeVault, readJson, runCli, snapshotTree, tmp, writeJson,
+  BIN, FIXTURES, fakeBinary, fakeSpawn, makeGitDir, makeHome, makeRepo, makeVault, readJson, runCli, snapshotTree, tmp, writeJson,
 } from './helpers.mjs'
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 const VERSION = readJson(join(dirname(BIN), '..', 'package.json')).version
 // Pins specs/cli-shell/spec.md, "Usage is printed on request and never as an error" (scenario
-// "Usage names every command and environment variable"): the twenty commands, `context` (add-dial-ask) after `brief`.
+// "Usage names every command and environment variable"): the twenty-one commands, `context` (add-dial-ask) after
+// `brief` and `voice` (add-voice-ui) after `watch`.
 const COMMANDS = [
   'version', 'limits', 'doctor', 'register', 'unregister', 'repos', 'help', 'vault', 'sync', 'next', 'brief', 'context',
-  'handoff', 'narrate', 'record', 'drop', 'agent', 'watch', 'report', 'review',
+  'handoff', 'narrate', 'record', 'drop', 'agent', 'watch', 'voice', 'report', 'review',
 ]
 const ENV_VARS = ['DIAL_HOME', 'DIAL_NOW', 'DIAL_LAUNCHCTL_BIN', 'ESCAPEMENT_HOME', 'ESCAPEMENT_CHECKPOINT_URL']
 
@@ -107,6 +111,23 @@ test('the context line directly follows the brief entry and names [<repo>] and -
   const block = lines.slice(context, after).join('\n')
   assert.ok(block.includes('[<repo>]'), block)
   assert.ok(block.includes('--json'), block)
+})
+
+test('the voice line directly follows the watch entry, names the five options and does not name --json', async () => {
+  // Pins specs/cli-shell/spec.md, "Usage is printed on request and never as an error" (scenario "The voice line
+  // follows the watch line").
+  const r = await runCli(['help'], { DIAL_HOME: makeHome() })
+  const lines = r.stdout.split('\n')
+  const entryAt = name => lines.findIndex(l => new RegExp(`^ {2}${name}\\b`).test(l))
+  const watch = entryAt('watch')
+  const voice = entryAt('voice')
+  assert.ok(watch >= 0 && voice > watch, 'usage has a watch entry and a voice entry after it')
+  const nextEntry = lines.findIndex((l, i) => i > watch && /^ {2}\S/.test(l))
+  assert.equal(nextEntry, voice, `the first entry after watch is voice, got ${JSON.stringify(lines[nextEntry])}`)
+  const after = lines.findIndex((l, i) => i > voice && /^ {2}\S/.test(l))
+  const block = lines.slice(voice, after).join('\n')
+  for (const option of ['--port', '--model', '--say-voice', '--lang', '--no-open']) assert.ok(block.includes(option), `${option} in ${block}`)
+  assert.ok(!block.includes('--json'), block)
 })
 
 // --- version ----------------------------------------------------------------
@@ -225,10 +246,11 @@ test('repos --json is pretty-printed, parseable, newline-terminated, and nothing
   assert.deepEqual(parsed, [{ name: 'katipon', path: dir, vault: 'personal', host: 'github' }])
 })
 
+// Re-pinned for add-voice-ui, limits: "Caps are available as JSON" (the sixteen keys, in the published order).
 test('limits --json is pretty-printed', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
-  assert.equal(r.stdout, JSON.stringify(THIRTEEN_CAPS, null, 2) + '\n')
+  assert.equal(r.stdout, JSON.stringify(SIXTEEN_CAPS, null, 2) + '\n')
 })
 
 test('--json does not change the exit code: doctor --json exits 1 when a check fails, same as text', async () => {
@@ -251,8 +273,9 @@ test('--json does not change the exit code: doctor --json exits 1 when a check f
 // --- limits -----------------------------------------------------------------
 
 // Pins specs/limits/spec.md, "Every cap is published with a default and a description"
-// (add-dial-ask delta): thirteen caps, the last three new.
-const THIRTEEN_CAPS = {
+// (add-voice-ui delta, scenarios "Defaults with no registry" and "Every cap has a description"): sixteen caps,
+// the three voice caps last (thirteen before add-voice-ui).
+const SIXTEEN_CAPS = {
   staleDays: 14,
   archivedKeepDays: 30,
   briefLines: 40,
@@ -265,30 +288,36 @@ const THIRTEEN_CAPS = {
   watchPollSeconds: 30,
   remotePullRequests: 20,
   contextNarrative: 5,
-  contextLines: 200
+  contextLines: 200,
+  voiceTurnSeconds: 120,
+  voiceCloseSeconds: 10,
+  voiceTurnChars: 2000
 }
 
-test('limits with no registry file prints exactly thirteen caps in the published order and exits 0', async () => {
+// Re-pinned for add-voice-ui, limits: "Every cap is published with a default and a description" (thirteen lines became sixteen).
+test('limits with no registry file prints exactly sixteen caps in the published order and exits 0', async () => {
   const r = await runCli(['limits'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
   assert.ok(r.stdout.endsWith('\n'))
   const lines = r.stdout.slice(0, -1).split('\n')
-  assert.equal(lines.length, 13)
+  assert.equal(lines.length, 16)
   for (const line of lines) assert.match(line, /^\S+\s+=\s+\d+  [a-z]/)
-  Object.entries(THIRTEEN_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
+  Object.entries(SIXTEEN_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
 })
 
+// Re-pinned for add-voice-ui, limits: "Caps are available as JSON" (scenario "JSON caps": sixteen keys).
 test('limits --json prints the defaults as an object', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
-  assert.deepEqual(JSON.parse(r.stdout), THIRTEEN_CAPS)
-  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(THIRTEEN_CAPS))
+  assert.deepEqual(JSON.parse(r.stdout), SIXTEEN_CAPS)
+  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(SIXTEEN_CAPS))
 })
 
+// Re-pinned for add-voice-ui, limits: "The registry overrides a cap" (scenario "Override is reflected": the other fifteen keep their defaults).
 test('a registry limits override is reflected and the other caps keep their defaults', async () => {
   const s = setup({ limits: { staleDays: 7 } })
   const r = await runCli(['limits', '--json'], s.env)
   assert.equal(r.code, 0)
-  assert.deepEqual(JSON.parse(r.stdout), { ...THIRTEEN_CAPS, staleDays: 7 })
+  assert.deepEqual(JSON.parse(r.stdout), { ...SIXTEEN_CAPS, staleDays: 7 })
   const text = await runCli(['limits'], s.env)
   assert.match(text.stdout.split('\n')[0], /^staleDays\s+=\s+7  /)
 })
@@ -1309,4 +1338,486 @@ test('review --week writes one note per vault, then leaves it unchanged', async 
   const again = await runCli(['review', '--week', '--json'], env)
   assert.equal(again.code, 0, again.stderr)
   assert.ok(JSON.parse(again.stdout).some(row => row.verb === 'unchanged'))
+})
+
+// --- voice (specs/voice, specs/cli-shell, specs/dial-home, specs/limits) ----------------------------
+
+const VOICE_PROMPT_FILE = join(dirname(BIN), '..', 'lib', 'voice', 'prompt.md')
+
+/** A PATH directory holding fake programs; each one records its own name and arguments in `ran`. */
+function voiceBin({ claude = true, dial = true, extra = [] } = {}) {
+  const dir = tmp('voice-bin-')
+  const ran = join(dir, 'ran.txt')
+  const body = `echo "$0 $*" >> '${ran}'`
+  for (const name of [claude && 'claude', dial && 'dial', ...extra].filter(Boolean)) fakeBinary(dir, name, body)
+  return { dir, ran }
+}
+
+/** A DIAL_HOME path that does not exist yet, so a test can see whether a command created it. */
+const absentHome = () => join(tmp('voice-absent-'), 'home')
+
+/** Waits, in real time, for `check()`; fails with `what` after about two seconds. */
+async function until(check, what) {
+  for (let i = 0; i < 400; i += 1) {
+    if (check()) return
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
+  assert.fail(`timed out waiting for ${what}`)
+}
+
+const ADDRESS_LINE = /^dial voice: http:\/\/127\.0\.0\.1:(\d+)\/\?t=([0-9a-f]{32})$/
+
+/**
+ * `dial voice` in this process: `main` with a fake `listen` and `fakeSpawn`. `listen` defaults to one that answers
+ * ok and records `{ handler, port }`; `finish()` aborts the injected signal, exits any child the command ended (a
+ * fake child never exits by itself) and resolves to the exit code.
+ */
+function launchVoice(args, { listen, platform = 'linux', home = absentHome(), env = {}, bin = voiceBin() } = {}) {
+  const { spawn: fake, children } = fakeSpawn()
+  const listens = []
+  const closed = []
+  const controller = new AbortController()
+  const out = []
+  const err = []
+  const listener = listen || (async (handler, { port }) => {
+    listens.push({ handler, port })
+    return { ok: true, close: async () => { closed.push(port) } }
+  })
+  const recording = listen ? async (handler, opts) => { listens.push({ handler, ...opts }); return listen(handler, opts) } : listener
+  const run = main(['voice', ...args], {
+    env: { DIAL_HOME: home, HOME: tmp('voice-user-'), PATH: bin.dir, DIAL_NOW: '2026-11-17T10:00:00Z', ...env },
+    stdout: { write: text => out.push(text) }, stderr: { write: text => err.push(text) },
+    spawn: fake, listen: recording, platform, signal: controller.signal,
+  })
+  let code
+  run.then(c => { code = c })
+  const named = name => children.filter(c => basename(c.file) === name)
+  return {
+    home, children, listens, closed, run,
+    stdout: () => out.join(''), stderr: () => err.join(''),
+    claude: () => named('claude')[0], opener: () => named('open')[0],
+    started: () => until(() => named('claude').length > 0, 'the claude child to start'),
+    async finish() {
+      controller.abort()
+      await until(() => {
+        for (const c of children) if (!c.exited && (c.killed || basename(c.file) === 'open')) c.exit(c.killed ? { signal: 'SIGTERM' } : {})
+        return code !== undefined
+      }, 'dial voice to exit')
+      return code
+    },
+    async exited() { await until(() => code !== undefined, 'dial voice to exit'); return code },
+  }
+}
+
+const startReport = (extra = {}) => JSON.stringify({ type: 'system', subtype: 'init', session_id: 's-1', tools: ['Bash'], mcp_servers: [], permissionMode: 'dontAsk', ...extra })
+
+// --- voice: options are checked before anything starts --------------------------------------------------
+
+for (const value of ['80', '70000', 'abc', '1023', '65536', '3425.5']) {
+  test(`voice --port ${value} is refused before the home is created or anything starts`, async () => {
+    // Pins specs/voice/spec.md, "voice takes five options and checks them before it starts anything" (scenario
+    // "A port out of range"); the PATH holds no claude, so a PATH check first would give another reason.
+    const home = absentHome()
+    const r = await runCli(['voice', '--port', value], { DIAL_HOME: home, PATH: tmp('voice-empty-') })
+    assert.equal(r.code, 1)
+    assert.equal(r.stdout, '')
+    assert.equal(r.stderr, `dial: --port must be a number from 1024 to 65535: ${value}\n`)
+    assert.equal(existsSync(home), false)
+  })
+}
+
+test('voice --lang "en US" is refused, and en, en-US and zh-Hant-TW are accepted', async () => {
+  // Pins specs/voice/spec.md, "voice takes five options and checks them before it starts anything" (scenario
+  // "A language that is not a tag").
+  const home = absentHome()
+  const bad = await runCli(['voice', '--lang', 'en US'], { DIAL_HOME: home, PATH: tmp('voice-empty-') })
+  assert.equal(bad.code, 1)
+  assert.equal(bad.stdout, '')
+  assert.equal(bad.stderr, 'dial: --lang is not a language tag: en US\n')
+  assert.equal(existsSync(home), false)
+  for (const tag of ['en', 'en-US', 'zh-Hant-TW']) {
+    // An accepted option gets as far as the listener, which answers that the port is taken.
+    const v = launchVoice(['--lang', tag], { listen: async () => ({ ok: false, code: 'EADDRINUSE', message: 'in use' }) })
+    assert.equal(await v.exited(), 1, tag)
+    assert.equal(v.stderr(), 'dial: port 3425 is in use; another dial voice may be running\n', tag)
+  }
+})
+
+test('voice --model=-p and --say-voice=-o are refused as names that could be read as options', async () => {
+  // Pins specs/voice/spec.md, scenario "A model or voice name that could be read as an option".
+  const home = absentHome()
+  const env = { DIAL_HOME: home, PATH: tmp('voice-empty-') }
+  const model = await runCli(['voice', '--model=-p'], env)
+  assert.equal(model.code, 1)
+  assert.equal(model.stdout, '')
+  assert.equal(model.stderr, 'dial: --model is not a model name: -p\n')
+  const voice = await runCli(['voice', '--say-voice=-o'], env)
+  assert.equal(voice.code, 1)
+  assert.equal(voice.stdout, '')
+  assert.equal(voice.stderr, 'dial: --say-voice is not a voice name: -o\n')
+  assert.equal(existsSync(home), false)
+})
+
+test('voice --model " " is refused as a name and --model= by the option parser', async () => {
+  // Pins specs/voice/spec.md, scenario "A name made of spaces".
+  const env = { DIAL_HOME: absentHome(), PATH: tmp('voice-empty-') }
+  const spaces = await runCli(['voice', '--model', ' '], env)
+  assert.equal(spaces.code, 1)
+  assert.equal(spaces.stdout, '')
+  assert.ok(spaces.stderr.startsWith('dial: --model is not a model name: '), spaces.stderr)
+  assertOneLine(spaces.stderr)
+  const empty = await runCli(['voice', '--model='], env)
+  assert.equal(empty.code, 1)
+  assert.equal(empty.stderr, 'dial: --model needs a value\n')
+})
+
+test('voice --json and a positional argument are refused', async () => {
+  // Pins specs/voice/spec.md, scenario "JSON output and positionals are refused".
+  const env = { DIAL_HOME: absentHome(), PATH: tmp('voice-empty-') }
+  const json = await runCli(['voice', '--json'], env)
+  assert.equal(json.code, 1)
+  assert.equal(json.stdout, '')
+  assert.equal(json.stderr, 'dial: unknown option: --json\n')
+  const positional = await runCli(['voice', 'katipon'], env)
+  assert.equal(positional.code, 1)
+  assert.equal(positional.stdout, '')
+  assert.equal(positional.stderr, 'dial: unexpected argument: katipon\n')
+  assert.equal(existsSync(env.DIAL_HOME), false)
+})
+
+// --- voice: claude and dial on PATH -------------------------------------------------------------------
+
+test('voice with no claude on PATH is refused and creates nothing', async () => {
+  // Pins specs/voice/spec.md, "voice needs claude and dial on PATH" (scenario "claude is missing"), and
+  // specs/dial-home/spec.md, scenario "A voice start that is refused creates nothing".
+  const bin = voiceBin({ claude: false })
+  const home = absentHome()
+  const r = await runCli(['voice'], { DIAL_HOME: home, PATH: bin.dir })
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: claude is not on PATH\n')
+  assert.equal(existsSync(home), false)
+  assert.equal(existsSync(bin.ran), false)
+  const neither = await runCli(['voice'], { DIAL_HOME: home, PATH: tmp('voice-empty-') })
+  assert.equal(neither.stderr, 'dial: claude is not on PATH\n', 'claude is named first when both are missing')
+})
+
+test('voice with no dial on PATH is refused and claude is not started', async () => {
+  // Pins specs/voice/spec.md, scenario "dial is missing".
+  const bin = voiceBin({ dial: false })
+  const home = absentHome()
+  const r = await runCli(['voice'], { DIAL_HOME: home, PATH: bin.dir })
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: dial is not on PATH\n')
+  assert.equal(existsSync(home), false)
+  assert.equal(existsSync(bin.ran), false, 'claude was not started')
+})
+
+test('a claude without the execute bit does not count', async () => {
+  // Pins specs/voice/spec.md, scenario "A file that cannot be executed does not count".
+  const bin = voiceBin()
+  chmodSync(join(bin.dir, 'claude'), 0o644)
+  const r = await runCli(['voice'], { DIAL_HOME: absentHome(), PATH: bin.dir })
+  assert.equal(r.code, 1)
+  assert.equal(r.stderr, 'dial: claude is not on PATH\n')
+  assert.equal(existsSync(bin.ran), false)
+})
+
+// --- voice: the home and the caps ---------------------------------------------------------------------
+
+test('voice with a home that is a regular file is refused with the home reason, binding nothing and running nothing', async () => {
+  // Pins specs/dial-home/spec.md, "A writing command ensures the home before it writes anything else" (scenario
+  // "Voice with an unwritable home"). The fakes record any run and must not have run.
+  const bin = voiceBin({ extra: ['open'] })
+  const file = join(tmp('voice-file-'), 'not-a-dir')
+  writeFileSync(file, 'x')
+  const r = await runCli(['voice'], { DIAL_HOME: file, PATH: bin.dir })
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assertOneLine(r.stderr)
+  assert.match(r.stderr, /^dial: dial home is not writable: .+ \(\w+: .+\)\n$/)
+  assert.ok(r.stderr.includes(file), r.stderr)
+  assert.equal(existsSync(bin.ran), false, 'neither claude nor open ran')
+  const v = launchVoice([], { home: file, platform: 'darwin' })
+  assert.equal(await v.exited(), 1)
+  assert.match(v.stderr(), /^dial: dial home is not writable: /)
+  assert.equal(v.listens.length, 0, 'no port was bound')
+  assert.equal(v.children.length, 0, 'nothing was started')
+})
+
+test('voice with a bad cap in the registry gives the reason limits gives, before it listens or runs anything', async () => {
+  // Pins specs/limits/spec.md, "The registry overrides a cap" (scenario "Voice cap with a bad value").
+  const s = setup({ limits: { voiceCloseSeconds: 0 } })
+  const bin = voiceBin({ extra: ['open'] })
+  const env = { ...s.env, PATH: bin.dir }
+  const limits = await runCli(['limits'], env)
+  assert.equal(limits.code, 1)
+  assert.ok(limits.stderr.includes('voiceCloseSeconds'), limits.stderr)
+  const r = await runCli(['voice'], env)
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, limits.stderr)
+  assert.equal(existsSync(bin.ran), false, 'neither claude nor open ran')
+  const v = launchVoice([], { home: s.home })
+  assert.equal(await v.exited(), 1)
+  assert.equal(v.stderr(), limits.stderr)
+  assert.equal(v.listens.length, 0, 'the listener was not asked for a port')
+  assert.equal(v.children.length, 0)
+})
+
+// --- voice: in this process, with a fake listener and fake children --------------------------------------
+
+test('voice prints one address line with a new token for every launch, on the port asked for', async () => {
+  // Pins specs/voice/spec.md, "voice prints its address and opens one window" (scenario "The address line").
+  const tokens = []
+  for (let i = 0; i < 2; i += 1) {
+    const v = launchVoice(['--port', '4000', '--no-open'])
+    await v.started()
+    assert.equal(v.listens[0].port, 4000)
+    const lines = v.stdout().split('\n')
+    assert.equal(lines.length, 2, v.stdout())
+    assert.equal(lines[1], '')
+    const m = ADDRESS_LINE.exec(lines[0])
+    assert.ok(m, lines[0])
+    assert.equal(m[1], '4000')
+    tokens.push(m[2])
+    assert.equal(await v.finish(), 0)
+  }
+  assert.notEqual(tokens[0], tokens[1])
+})
+
+test('voice asks the listener for port 3425 by default', async () => {
+  // Pins specs/voice/spec.md, "voice takes five options..." (the default of --port) and "The listener binds loopback on one port".
+  const v = launchVoice(['--no-open'])
+  await v.started()
+  assert.equal(v.listens.length, 1)
+  assert.equal(v.listens[0].port, 3425)
+  assert.match(v.stdout(), /^dial voice: http:\/\/127\.0\.0\.1:3425\/\?t=[0-9a-f]{32}\n$/)
+  assert.equal(await v.finish(), 0)
+})
+
+test('a port in use is refused with its own line and nothing is started', async () => {
+  // Pins specs/voice/spec.md, "The listener binds loopback on one port" (scenario "The port is taken").
+  const v = launchVoice([], { listen: async () => ({ ok: false, code: 'EADDRINUSE', message: 'address already in use' }), platform: 'darwin' })
+  assert.equal(await v.exited(), 1)
+  assert.equal(v.stdout(), '')
+  assert.equal(v.stderr(), 'dial: port 3425 is in use; another dial voice may be running\n')
+  assert.equal(v.children.length, 0, 'no claude and no opener')
+})
+
+test('a listener that is not permitted is refused with the code and message, and nothing is started', async () => {
+  // Pins specs/voice/spec.md, scenario "Listening is not permitted".
+  const v = launchVoice(['--port', '4001'], { listen: async () => ({ ok: false, code: 'EPERM', message: 'operation not permitted' }), platform: 'darwin' })
+  assert.equal(await v.exited(), 1)
+  assert.equal(v.stdout(), '')
+  assert.equal(v.stderr(), 'dial: cannot listen on 127.0.0.1:4001 (EPERM: operation not permitted)\n')
+  assert.equal(v.children.length, 0)
+})
+
+test('voice creates the home, logs and an empty voice directory', async () => {
+  // Pins specs/dial-home/spec.md, "The home is created on first write and left alone afterwards" (scenario
+  // "Voice creates the layout").
+  const v = launchVoice(['--no-open'])
+  await v.started()
+  assert.ok(existsSync(join(v.home, 'logs')))
+  assert.ok(statSync(join(v.home, 'voice')).isDirectory())
+  assert.deepEqual(readdirSync(join(v.home, 'voice')), [])
+  assert.equal(await v.finish(), 0)
+})
+
+test('the session starts in the voice directory with the same home and clock, the packaged prompt and the default model', async () => {
+  // Pins specs/voice-engine/spec.md, "A conversation is one claude process fed over a stream" (cwd and
+  // environment) and the prompt rule: the prompt argument is the file lib/voice/prompt.md.
+  const v = launchVoice(['--no-open'])
+  await v.started()
+  const child = v.claude()
+  assert.equal(child.cwd, join(v.home, 'voice'))
+  assert.equal(child.env.DIAL_HOME, v.home)
+  assert.equal(child.env.DIAL_NOW, '2026-11-17T10:00:00Z')
+  const prompt = readFileSync(VOICE_PROMPT_FILE, 'utf8')
+  assert.equal(child.args[child.args.indexOf('--append-system-prompt') + 1], prompt)
+  assert.equal(child.args[child.args.indexOf('--model') + 1], 'sonnet')
+  assert.equal(child.args.includes('--session-id'), true)
+  assert.equal(await v.finish(), 0)
+})
+
+test('--model reaches the session', async () => {
+  const v = launchVoice(['--no-open', '--model', 'opus'])
+  await v.started()
+  const args = v.claude().args
+  assert.equal(args[args.indexOf('--model') + 1], 'opus')
+  assert.equal(await v.finish(), 0)
+})
+
+test('an abort ends the session and the listener and the exit code is 0 with nothing on stderr', async () => {
+  // Pins specs/voice/spec.md, "voice runs in the foreground until it is closed" (scenario "An interrupt ends the command").
+  const v = launchVoice(['--no-open'])
+  await v.started()
+  assert.equal(await v.finish(), 0)
+  assert.equal(v.claude().killed, true, 'the claude child was ended')
+  assert.equal(v.closed.length, 1, 'the listener was closed')
+  assert.equal(v.stderr(), '')
+})
+
+test('on macOS the window is opened once with Chrome in app mode at the printed address', async () => {
+  // Pins specs/voice/spec.md, "voice prints its address and opens one window" (scenario "The window is opened on macOS").
+  const v = launchVoice([], { platform: 'darwin' })
+  await until(() => v.opener(), 'the opener to start')
+  const address = v.stdout().trim().replace(/^dial voice: /, '')
+  assert.match(address, /^http:\/\/127\.0\.0\.1:3425\/\?t=[0-9a-f]{32}$/)
+  assert.deepEqual(v.opener().args, ['-na', 'Google Chrome', '--args', `--app=${address}`])
+  assert.equal(v.children.filter(c => basename(c.file) === 'open').length, 1)
+  assert.equal(await v.finish(), 0)
+})
+
+test('no opener runs with --no-open or off macOS', async () => {
+  // Pins specs/voice/spec.md, scenario "No opener on request or off macOS".
+  for (const [args, platform] of [[['--no-open'], 'darwin'], [[], 'linux']]) {
+    const v = launchVoice(args, { platform })
+    await v.started()
+    assert.equal(v.opener(), undefined, `${args.join(' ')} on ${platform}`)
+    assert.equal(await v.finish(), 0)
+  }
+})
+
+test('a refused session is reported once and the exit code after an abort is 1', async () => {
+  // Pins specs/voice-engine/spec.md, "A refused session is ended and reported, and no other is started"
+  // (scenarios "The refusal reaches the terminal and the page" and "The exit code"); cli-shell: exactly one `dial: ` line.
+  const v = launchVoice(['--no-open'])
+  await v.started()
+  v.claude().line(startReport({ tools: ['Bash', 'Read'] }))
+  await until(() => v.stderr() !== '', 'the refusal line')
+  assert.equal(v.claude().killed, true, 'the refused session was ended')
+  assert.equal(await v.finish(), 1)
+  assert.equal(v.stderr(), 'dial: voice session refused: it has tools other than Bash: Read\n')
+  assert.equal(v.children.filter(c => basename(c.file) === 'claude').length, 1, 'no second session')
+})
+
+test('a failed opener is one warning and the command goes on to exit 0', async () => {
+  // Pins specs/cli-shell/spec.md, "Every failure is one reason line on stderr" (scenario "A voice warning is not
+  // the failure line") and specs/voice/spec.md, scenario "The opener fails".
+  const v = launchVoice([], { platform: 'darwin' })
+  await until(() => v.opener(), 'the opener to start')
+  v.opener().exit({ code: 1, stderr: 'Unable to find application named "Google Chrome"\nsecond line\n' })
+  await until(() => v.stderr() !== '', 'the warning')
+  assert.equal(v.claude().killed, false, 'the command keeps running')
+  assert.equal(await v.finish(), 0)
+  assert.equal(v.stderr(), 'dial: could not open Chrome (Unable to find application named "Google Chrome"); open the address above in Chrome\n')
+})
+
+test('a failed opener and then a refused session are two lines and the exit code is 1', async () => {
+  // Pins specs/cli-shell/spec.md, scenario "A voice warning beside the failure line".
+  const v = launchVoice([], { platform: 'darwin' })
+  await until(() => v.opener(), 'the opener to start')
+  v.opener().exit({ code: 1, stderr: 'Unable to find application named "Google Chrome"\n' })
+  await until(() => v.stderr() !== '', 'the warning')
+  v.claude().line(startReport({ mcp_servers: [{ name: 'github', status: 'connected' }] }))
+  await until(() => v.stderr().split('\n').length > 2, 'the refusal line')
+  assert.equal(await v.finish(), 1)
+  assert.equal(
+    v.stderr(),
+    'dial: could not open Chrome (Unable to find application named "Google Chrome"); open the address above in Chrome\n' +
+    'dial: voice session refused: it has MCP servers: github\n'
+  )
+})
+
+// --- voice: one real process with fake programs ----------------------------------------------------------
+
+/** A free loopback port, or null where the bind is refused with EPERM. */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = createServer()
+    server.on('error', e => (e.code === 'EPERM' ? resolve(null) : reject(e)))
+    server.listen(0, '127.0.0.1', () => {
+      const { port } = server.address()
+      server.close(() => resolve(port))
+    })
+  })
+}
+
+/** One request to the child on 127.0.0.1:port; resolves { status, headers, body } and never rejects on a status. */
+function httpTo(port, { method = 'GET', path = '/', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: '127.0.0.1', port, method, path, headers }, res => {
+      const chunks = []
+      res.on('data', c => chunks.push(c))
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }))
+    })
+    req.on('error', reject)
+    req.end(body)
+  })
+}
+
+test('dial voice serves the page, takes a turn to a fake claude, streams a sentence and ends on SIGINT', { timeout: 30_000 }, async t => {
+  // One subprocess case (tasks 1.8): `dial voice --no-open` with fake claude, dial and say on PATH. Skipped where
+  // the bind is refused, as the sandbox does.
+  const port = await freePort()
+  if (port === null) return t.skip('loopback bind refused (EPERM)')
+  const state = tmp('voice-e2e-')
+  const bin = tmp('voice-e2e-bin-')
+  const delta = JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Two are open. ' } } })
+  fakeBinary(bin, 'claude', [
+    `echo $$ > '${state}/claude.pid'`,
+    `printf '%s\\n' '${startReport()}'`,
+    'while IFS= read -r line; do',
+    `  printf '%s\\n' "$line" >> '${state}/turns.txt'`,
+    `  printf '%s\\n' '${delta}'`,
+    `  printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"Two are open."}'`,
+    'done',
+  ].join('\n'))
+  fakeBinary(bin, 'dial', 'exit 0')
+  fakeBinary(bin, 'say', `cat >> '${state}/say.txt'`)
+  const child = spawnCli(['voice', '--no-open', '--port', String(port)], {
+    DIAL_HOME: join(state, 'home'), HOME: tmp('voice-user-'), PATH: `${bin}:/usr/bin:/bin`,
+  })
+  let stdout = ''
+  child.stdout.on('data', c => { stdout += c })
+  let stderr = ''
+  child.stderr.on('data', c => { stderr += c })
+  const exit = new Promise(resolve => child.on('close', (c, sig) => resolve(sig ? `signal ${sig}` : c)))
+  try {
+    await until(() => ADDRESS_LINE.test(stdout.split('\n')[0]), 'the address line')
+    const [, linePort, token] = ADDRESS_LINE.exec(stdout.split('\n')[0])
+    assert.equal(linePort, String(port))
+    const origin = `http://127.0.0.1:${port}`
+
+    const page = await httpTo(port, { path: `/?t=${token}` })
+    assert.equal(page.status, 200)
+    assert.match(page.headers['content-type'], /^text\/html/)
+    assert.ok(page.body.includes('/page.js'), 'the page refers to its script')
+
+    // The event stream stays open until the command ends, so SIGINT has an open stream to close.
+    let events = ''
+    const stream = httpRequest({ host: '127.0.0.1', port, path: `/events?t=${token}` }, res => res.on('data', c => { events += c }))
+    stream.on('error', () => {})
+    stream.end()
+    await until(() => events.includes('event: state'), 'hello and the first state on the event stream')
+
+    const post = headers => httpTo(port, {
+      method: 'POST', path: '/turn', body: JSON.stringify({ text: 'what needs me' }),
+      headers: { 'content-type': 'application/json', 'x-dial-token': token, origin, ...headers },
+    })
+    const foreign = await post({ origin: 'https://example.com' })
+    assert.equal(foreign.status, 403)
+    assert.equal(existsSync(join(state, 'turns.txt')), false, 'a refused request reached nothing')
+
+    const accepted = await post({})
+    assert.equal(accepted.status, 202)
+    assert.deepEqual(JSON.parse(accepted.body), { ok: true })
+    await until(() => existsSync(join(state, 'turns.txt')), 'the turn to reach claude')
+    assert.ok(readFileSync(join(state, 'turns.txt'), 'utf8').includes('what needs me'))
+    await until(() => events.includes('event: sentence'), 'a sentence on the event stream')
+    assert.ok(events.includes('data: {"text":"Two are open."}'), events)
+
+    const claudePid = Number(readFileSync(join(state, 'claude.pid'), 'utf8'))
+    child.kill('SIGINT')
+    assert.equal(await exit, 0, stderr)
+    stream.destroy()
+    await until(() => {
+      try { process.kill(claudePid, 0); return false } catch { return true }
+    }, 'the fake claude to be gone')
+  } finally {
+    child.kill('SIGKILL')
+  }
 })
