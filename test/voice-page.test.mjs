@@ -138,9 +138,22 @@ function fakePost() {
   return post
 }
 
+/**
+ * `get` that answers at once from `reply(path)` (default: a log of two lines) and records every path on `get.calls`.
+ * Contract from design §11: get(path) -> Promise<{ status, body }>; the page adds the token itself.
+ */
+function fakeGet(reply = path => ({ status: 200, body: { ok: true, id: new URL(path, 'http://x').searchParams.get('id'), lines: ['● Running tests', '  12 passed'] } })) {
+  const get = async path => {
+    get.calls.push(path)
+    return reply(path)
+  }
+  get.calls = []
+  return get
+}
+
 /** A recording `view`; `log` holds every call in order. */
 function fakeView() {
-  const log = { statuses: [], errors: [], lines: [], notices: [], interims: [], inputsCleared: 0, focused: 0, closed: 0 }
+  const log = { statuses: [], errors: [], lines: [], notices: [], interims: [], proposals: [], sessionLists: [], logs: [], inputsCleared: 0, focused: 0, closed: 0 }
   const view = {
     status: text => log.statuses.push(text),
     error: text => log.errors.push(text),
@@ -153,6 +166,9 @@ function fakeView() {
     focusStatus: () => {
       log.focused += 1
     },
+    proposal: (proposal, reason) => log.proposals.push([proposal, reason]),
+    sessions: sessions => log.sessionLists.push(sessions),
+    log: (id, lines, reason) => log.logs.push([id, lines, reason]),
     closed: () => {
       log.closed += 1
     },
@@ -167,19 +183,21 @@ const sequence = list => list.filter((text, i) => i === 0 || text !== list[i - 1
  * A controller, its stream open, `hello` and the first `state` delivered.
  * `recognition: false` is a browser with no SpeechRecognition.
  */
-async function sitting({ recognition = {}, lang = 'en-US', state = 'idle' } = {}) {
+async function sitting({ recognition = {}, lang = 'en-US', state = 'idle', getReply } = {}) {
   const R = fakeRecognition(recognition || {})
   const connect = fakeConnect()
   const post = fakePost()
+  const get = fakeGet(getReply)
   const { timers, advance } = fakeTimers()
   const { view, log } = fakeView()
-  const c = createController({ Recognition: recognition === false ? undefined : R.Recognition, post, connect, timers, view })
+  const c = createController({ Recognition: recognition === false ? undefined : R.Recognition, post, get, connect, timers, view })
   c.open()
   const s = {
     c,
     R,
     connect,
     post,
+    get,
     advance,
     log,
     emit: async (name, data = {}) => {
@@ -425,7 +443,9 @@ test('no-speech and aborted are ends with no notice, and recognition starts agai
 
 // ---------------------------------------------------------------- listening only while idle
 
-// voice: "The page listens only while Dial is idle"
+// voice (modified): "The page listens only while Dial is idle" - every final transcript is a turn, except `confirm` and
+// `cancel` while the open proposal has the status `read` (re-pinned from "every final transcript is a turn"; the
+// exception has its own cases in the proposal section below).
 test('a final transcript is stopped on and posted as a turn with the interim text cleared', async () => {
   const s = await listening()
   await s.hear('what needs me', true)
@@ -922,6 +942,220 @@ test('a stream that ends after bye is not reopened', async () => {
   assert.equal(shown(s.log), 'Closed')
 })
 
+// ---------------------------------------------------------------- confirm and cancel by voice
+
+const PROPOSAL = { id: 'ab12cd34', repo: 'katipon', prompt: '/interlock:ship add-parser', status: 'pending' }
+const SESSION = { id: 'c7b0ada6', repo: 'katipon', cwd: '/repos/katipon', state: 'blocked', waitingFor: 'permission prompt', startedAt: '2026-11-17T07:21:39.451Z', prompt: '/interlock:ship add-parser', sessionId: 'c7b0ada6-b039-4dca-8847-cfb263166f6b' }
+const calls = s => s.post.calls.map(call => [call.path, call.body])
+const reasonOf = ([proposal, reason]) => reason ?? proposal?.reason
+
+// voice: "Confirm after the reading"
+test('the word confirm while the proposal is read is posted to /confirm as spoken, and not as a turn', async () => {
+  for (const said of ['Confirm.', 'confirm', ' CONFIRM! ', 'Confirm?']) {
+    const s = await listening()
+    await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+    await s.hear(said, true)
+    assert.deepEqual(calls(s), [['/confirm', { id: 'ab12cd34', spoken: true }]], said)
+  }
+})
+
+// voice: "Cancel after the reading"
+test('the word cancel while the proposal is read is posted to /cancel, and not as a turn', async () => {
+  for (const said of ['cancel', 'Cancel.']) {
+    const s = await listening()
+    await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+    await s.hear(said, true)
+    assert.deepEqual(calls(s), [['/cancel', { id: 'ab12cd34' }]], said)
+  }
+})
+
+// voice: "Confirm before the reading is a turn"
+test('confirm while the proposal is pending, or with no proposal open, is an ordinary turn', async () => {
+  const pending = await listening()
+  await pending.emit('proposal', { ...PROPOSAL, status: 'pending' })
+  await pending.hear('confirm', true)
+  assert.deepEqual(calls(pending), [['/turn', { text: 'confirm' }]])
+  const none = await listening()
+  await none.hear('confirm', true)
+  assert.deepEqual(calls(none), [['/turn', { text: 'confirm' }]])
+  const closed = await listening()
+  await closed.emit('proposal', { ...PROPOSAL, status: 'read' })
+  await closed.emit('proposal', { ...PROPOSAL, status: 'cancelled' })
+  await closed.hear('confirm', true)
+  assert.deepEqual(calls(closed), [['/turn', { text: 'confirm' }]], 'a closed proposal no longer takes the word')
+})
+
+// voice: "Confirm inside a sentence is a turn"
+test('confirm inside a sentence, and yes, are turns even while the proposal is read', async () => {
+  for (const said of ['can you confirm that', 'yes', 'confirm it']) {
+    const s = await listening()
+    await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+    await s.hear(said, true)
+    assert.deepEqual(calls(s), [['/turn', { text: said }]], said)
+  }
+})
+
+// voice: "A typed word is a turn"
+test('a typed confirm is a turn even while the proposal is read', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+  const done = s.c.submit('confirm')
+  await flush()
+  assert.deepEqual(calls(s), [['/turn', { text: 'confirm' }]])
+  s.post.answer(202)
+  await done
+})
+
+// ---------------------------------------------------------------- the proposal card
+// voice-sessions: "The page shows an open proposal with Confirm and Cancel".
+
+test('a proposal event reaches the view with its repo, prompt and status; a closed one takes the card away', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  assert.deepEqual(s.log.proposals.at(-1)[0], PROPOSAL)
+  for (const status of ['started', 'cancelled', 'expired', 'replaced']) {
+    await s.emit('proposal', PROPOSAL)
+    await s.emit('proposal', { ...PROPOSAL, status })
+    assert.equal(s.log.proposals.at(-1)[0], null, `${status} removes the card`)
+  }
+})
+
+test('Confirm by a click posts the id and spoken false', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  const done = s.c.confirm()
+  await flush()
+  assert.deepEqual(calls(s), [['/confirm', { id: 'ab12cd34', spoken: false }]])
+  s.post.answer(202, { ok: true })
+  await done
+})
+
+test('Cancel by a click posts the id to /cancel', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  const done = s.c.cancel()
+  await flush()
+  assert.deepEqual(calls(s), [['/cancel', { id: 'ab12cd34' }]])
+  s.post.answer(200, { ok: true })
+  await done
+})
+
+test('a refused confirmation shows its reason and keeps the card', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  const done = s.c.confirm()
+  await flush()
+  s.post.answer(409, { ok: false, reason: 'a session is already running in katipon' })
+  await done
+  await flush()
+  const shownReasons = [...s.log.errors, ...s.log.proposals.map(reasonOf)]
+  assert.ok(shownReasons.includes('a session is already running in katipon'), 'the reason is shown')
+  assert.equal(s.log.proposals.at(-1)[0]?.id, 'ab12cd34', 'the card is kept')
+})
+
+test('a failed start shows its reason and the card carries the failed status, so no Confirm is offered', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, status: 'failed', reason: 'claude --bg failed (exit 1): Workspace not trusted.' })
+  const last = s.log.proposals.at(-1)
+  assert.equal(last[0].status, 'failed')
+  assert.equal(reasonOf(last), 'claude --bg failed (exit 1): Workspace not trusted.')
+})
+
+test('a prompt that looks like markup reaches the view as the same string', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, prompt: '<img src=x onerror=alert(1)>' })
+  assert.equal(s.log.proposals.at(-1)[0].prompt, '<img src=x onerror=alert(1)>')
+})
+
+test('a notice event reaches the view as text', async () => {
+  const s = await sitting()
+  await s.emit('notice', { text: 'The session in katipon needs you: permission prompt.' })
+  const texts = [...s.log.notices, ...s.log.lines.map(l => l[1])]
+  assert.ok(texts.includes('The session in katipon needs you: permission prompt.'))
+})
+
+// ---------------------------------------------------------------- the session list and its controls
+// voice-sessions: "The page lists the sessions with their controls".
+
+test('a sessions event reaches the view with the whole list', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  assert.deepEqual(s.log.sessionLists.at(-1), [SESSION])
+  await s.emit('sessions', { sessions: [], pollSeconds: 5 })
+  assert.deepEqual(s.log.sessionLists.at(-1), [])
+})
+
+test('Stop and Terminal post the id, and a refusal shows its reason', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  const stopped = s.c.stopSession('c7b0ada6')
+  await flush()
+  assert.deepEqual(calls(s), [['/stop', { id: 'c7b0ada6' }]])
+  s.post.answer(502, { ok: false, reason: 'claude stop failed (exit 1): already stopped' })
+  await stopped
+  assert.ok(s.log.errors.includes('claude stop failed (exit 1): already stopped'))
+  const attached = s.c.attach('c7b0ada6')
+  await flush()
+  assert.deepEqual(calls(s).at(-1), ['/attach', { id: 'c7b0ada6' }])
+  s.post.answer(409, { ok: false, reason: 'run this in a terminal: claude attach c7b0ada6' })
+  await attached
+  assert.ok(s.log.errors.includes('run this in a terminal: claude attach c7b0ada6'))
+})
+
+test('the log is asked for at once and every pollSeconds, and its lines reach the view', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  assert.equal(s.get.calls.length, 1)
+  assert.match(s.get.calls[0], /^\/log\?id=c7b0ada6$/)
+  assert.deepEqual(s.log.logs.at(-1).slice(0, 2), ['c7b0ada6', ['● Running tests', '  12 passed']])
+  s.advance(4999)
+  await flush()
+  assert.equal(s.get.calls.length, 1)
+  s.advance(1)
+  await flush()
+  assert.equal(s.get.calls.length, 2)
+  s.advance(5000)
+  await flush()
+  assert.equal(s.get.calls.length, 3)
+})
+
+test('the log is no longer asked for after closeLog', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  s.c.closeLog()
+  s.advance(60_000)
+  await flush()
+  assert.equal(s.get.calls.length, 1)
+})
+
+test('the log is no longer asked for after a sessions event without that session, and goes on while it is listed', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  await s.emit('sessions', { sessions: [{ ...SESSION, state: 'working', waitingFor: null }], pollSeconds: 5 })
+  s.advance(5000)
+  await flush()
+  assert.equal(s.get.calls.length, 2, 'still listed: still asked')
+  await s.emit('sessions', { sessions: [], pollSeconds: 5 })
+  s.advance(60_000)
+  await flush()
+  assert.equal(s.get.calls.length, 2, 'no longer listed: not asked')
+})
+
+// voice-sessions: "A log line that looks like markup"
+test('a log line that looks like markup reaches the view unchanged', async () => {
+  const s = await sitting({ getReply: () => ({ status: 200, body: { ok: true, id: 'c7b0ada6', lines: ['<script>alert(1)</script>'] } }) })
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  assert.deepEqual(s.log.logs.at(-1)[1], ['<script>alert(1)</script>'])
+})
+
 // ---------------------------------------------------------------- the page files as text
 
 const PAGE_FILES = ['page.html', 'page.js', 'page-logic.mjs', 'page.css']
@@ -1036,4 +1270,32 @@ test('page.html says what Dial voice is for and suggests a first question in the
   assert.ok(html.includes(suggestion), 'the first question')
   assert.ok(html.indexOf(purpose) < html.search(/\bid\s*=\s*["']transcript["']/), 'the purpose sits above the transcript')
   assert.ok(html.indexOf(suggestion) > html.search(/\bid\s*=\s*["']transcript["']/), 'the suggestion sits in the transcript')
+})
+
+// ---------------------------------------------------------------- the page files, with proposals and sessions
+// voice-sessions: "The page shows session strings as text", "The page shows an open proposal with Confirm and Cancel",
+// "The page lists the sessions with their controls". The DOM mapping cannot run here, so its rules are read as text.
+
+test('page.js maps proposal, sessions and log onto the document with textContent and passes get to the controller', () => {
+  const source = read('page.js')
+  assert.match(source, /\bproposal\b/)
+  assert.match(source, /\bsessions\b/)
+  assert.match(source, /\blog\b/)
+  assert.match(source, /textContent/)
+  assert.match(source, /\bget\b/, 'passes get')
+  assert.match(source, /\/log/, 'asks GET /log')
+})
+
+test('the page offers Confirm, Cancel, Log, Stop and Terminal, and shows the claude attach command', () => {
+  const text = read('page.html') + read('page.js')
+  for (const word of ['Confirm', 'Cancel', 'Log', 'Stop', 'Terminal', 'claude attach']) assert.ok(text.includes(word), word)
+})
+
+test('the controller of the four page files names no markup sink for the new events', () => {
+  for (const name of ['page.js', 'page-logic.mjs']) {
+    const source = read(name)
+    for (const pattern of [/innerHTML/, /outerHTML/, /insertAdjacentHTML/, /document\s*\.\s*write/, /\beval\s*\(/, /\bcreateContextualFragment\b/, /\bDOMParser\b/]) {
+      assert.doesNotMatch(source, pattern, `${name} ${pattern}`)
+    }
+  }
 })

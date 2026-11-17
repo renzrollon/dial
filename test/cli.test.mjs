@@ -8,6 +8,8 @@ import assert from 'node:assert/strict'
 import { execFile, execFileSync, spawn } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
 import { createServer } from 'node:net'
+import { EventEmitter } from 'node:events'
+import { Readable } from 'node:stream'
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { main } from '../bin/dial.mjs'
@@ -18,11 +20,12 @@ import {
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 const VERSION = readJson(join(dirname(BIN), '..', 'package.json')).version
 // Pins specs/cli-shell/spec.md, "Usage is printed on request and never as an error" (scenario
-// "Usage names every command and environment variable"): the twenty-one commands, `context` (add-dial-ask) after
-// `brief` and `voice` (add-voice-ui) after `watch`.
+// "Usage names every command and environment variable"): the twenty-three commands, `context` (add-dial-ask) after
+// `brief`, `voice` (add-voice-ui) after `watch`, and `propose` and `sessions` (add-voice-orchestrator) after `voice`.
+// Re-pinned for add-voice-orchestrator, cli-shell: twenty-one commands became twenty-three.
 const COMMANDS = [
   'version', 'limits', 'doctor', 'register', 'unregister', 'repos', 'help', 'vault', 'sync', 'next', 'brief', 'context',
-  'handoff', 'narrate', 'record', 'drop', 'agent', 'watch', 'voice', 'report', 'review',
+  'handoff', 'narrate', 'record', 'drop', 'agent', 'watch', 'voice', 'propose', 'sessions', 'report', 'review',
 ]
 const ENV_VARS = ['DIAL_HOME', 'DIAL_NOW', 'DIAL_LAUNCHCTL_BIN', 'ESCAPEMENT_HOME', 'ESCAPEMENT_CHECKPOINT_URL']
 
@@ -75,6 +78,7 @@ test('--help after a command prints usage and exits 0', async () => {
 test('usage lists every command on its own line and ends with the Environment line naming the five variables', async () => {
   const r = await runCli(['help'], { DIAL_HOME: makeHome() })
   const lines = r.stdout.split('\n')
+  assert.equal(COMMANDS.length, 23, 'the twenty-three commands of cli-shell: Usage names every command and environment variable')
   for (const cmd of COMMANDS) {
     assert.ok(
       lines.some(l => new RegExp(`^\\s*(dial\\s+)?${cmd}\\b`).test(l)),
@@ -128,6 +132,29 @@ test('the voice line directly follows the watch entry, names the five options an
   const block = lines.slice(voice, after).join('\n')
   for (const option of ['--port', '--model', '--say-voice', '--lang', '--no-open']) assert.ok(block.includes(option), `${option} in ${block}`)
   assert.ok(!block.includes('--json'), block)
+})
+
+test('the propose and sessions lines follow the voice lines, propose names <repo> and --prompt <text>, its description names --json and says it starts nothing', async () => {
+  // Pins specs/cli-shell/spec.md (add-voice-orchestrator delta), "Usage is printed on request and never as an error"
+  // (scenario "The propose and sessions lines follow the voice lines").
+  const r = await runCli(['help'], { DIAL_HOME: makeHome() })
+  const lines = r.stdout.split('\n')
+  const entryAt = name => lines.findIndex(l => new RegExp(`^ {2}${name}\\b`).test(l))
+  const [voice, propose, sessions] = ['voice', 'propose', 'sessions'].map(entryAt)
+  assert.ok(voice >= 0 && propose > voice && sessions > propose, 'usage has voice, propose and sessions entries in that order')
+  const entryAfter = at => lines.findIndex((l, i) => i > at && /^ {2}\S/.test(l))
+  assert.equal(entryAfter(voice), propose, `the first entry after voice is propose, got ${JSON.stringify(lines[entryAfter(voice)])}`)
+  assert.equal(entryAfter(propose), sessions, `the first entry after propose is sessions, got ${JSON.stringify(lines[entryAfter(propose)])}`)
+  assert.equal(lines.slice(voice + 1, propose).length, 1, 'the voice entry is two lines')
+  assert.match(lines[propose], /^ {2}propose <repo> --prompt <text>\s*$/)
+  const description = lines[propose + 1]
+  assert.match(description, /^ {31}\S/, 'the description is on the next line at the description column')
+  assert.ok(description.includes('--json'), description)
+  assert.match(description, /starts nothing/)
+  assert.equal(description.trim(), 'draft a Claude Code session for the dial voice window to confirm; starts nothing (--json)')
+  const sessionsBlock = lines.slice(sessions, entryAfter(sessions)).join('\n')
+  assert.ok(sessionsBlock.includes('--json'), sessionsBlock)
+  assert.ok(sessionsBlock.includes('list the Claude Code sessions dial voice started (--json)'), sessionsBlock)
 })
 
 // --- version ----------------------------------------------------------------
@@ -246,11 +273,11 @@ test('repos --json is pretty-printed, parseable, newline-terminated, and nothing
   assert.deepEqual(parsed, [{ name: 'katipon', path: dir, vault: 'personal', host: 'github' }])
 })
 
-// Re-pinned for add-voice-ui, limits: "Caps are available as JSON" (the sixteen keys, in the published order).
+// Re-pinned for add-voice-orchestrator, limits: "Caps are available as JSON" (the twenty-one keys, in the published order).
 test('limits --json is pretty-printed', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
-  assert.equal(r.stdout, JSON.stringify(SIXTEEN_CAPS, null, 2) + '\n')
+  assert.equal(r.stdout, JSON.stringify(TWENTY_ONE_CAPS, null, 2) + '\n')
 })
 
 test('--json does not change the exit code: doctor --json exits 1 when a check fails, same as text', async () => {
@@ -273,8 +300,8 @@ test('--json does not change the exit code: doctor --json exits 1 when a check f
 // --- limits -----------------------------------------------------------------
 
 // Pins specs/limits/spec.md, "Every cap is published with a default and a description"
-// (add-voice-ui delta, scenarios "Defaults with no registry" and "Every cap has a description"): sixteen caps,
-// the three voice caps last (thirteen before add-voice-ui).
+// (add-voice-orchestrator delta, scenarios "Defaults with no registry" and "Every cap has a description"): twenty-one
+// caps, the five session caps last (sixteen before add-voice-orchestrator, the three voice caps last).
 const SIXTEEN_CAPS = {
   staleDays: 14,
   archivedKeepDays: 30,
@@ -293,31 +320,40 @@ const SIXTEEN_CAPS = {
   voiceCloseSeconds: 10,
   voiceTurnChars: 2000
 }
+const TWENTY_ONE_CAPS = {
+  ...SIXTEEN_CAPS,
+  voiceSessions: 3,
+  voiceSessionPollSeconds: 5,
+  voiceSessionRows: 12,
+  voiceLogLines: 200,
+  voiceProposalSeconds: 120
+}
 
-// Re-pinned for add-voice-ui, limits: "Every cap is published with a default and a description" (thirteen lines became sixteen).
-test('limits with no registry file prints exactly sixteen caps in the published order and exits 0', async () => {
+// Re-pinned for add-voice-orchestrator, limits: "Every cap is published with a default and a description" (sixteen lines became twenty-one).
+test('limits with no registry file prints exactly twenty-one caps in the published order and exits 0', async () => {
   const r = await runCli(['limits'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
   assert.ok(r.stdout.endsWith('\n'))
   const lines = r.stdout.slice(0, -1).split('\n')
-  assert.equal(lines.length, 16)
+  assert.equal(lines.length, 21)
   for (const line of lines) assert.match(line, /^\S+\s+=\s+\d+  [a-z]/)
-  Object.entries(SIXTEEN_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
+  Object.entries(TWENTY_ONE_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
+  assert.ok(lines[3].endsWith('seconds before a git, gh, glab, interlock or claude session call is abandoned'), lines[3])
 })
 
-// Re-pinned for add-voice-ui, limits: "Caps are available as JSON" (scenario "JSON caps": sixteen keys).
+// Re-pinned for add-voice-orchestrator, limits: "Caps are available as JSON" (scenario "JSON caps": twenty-one keys).
 test('limits --json prints the defaults as an object', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
-  assert.deepEqual(JSON.parse(r.stdout), SIXTEEN_CAPS)
-  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(SIXTEEN_CAPS))
+  assert.deepEqual(JSON.parse(r.stdout), TWENTY_ONE_CAPS)
+  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(TWENTY_ONE_CAPS))
 })
 
-// Re-pinned for add-voice-ui, limits: "The registry overrides a cap" (scenario "Override is reflected": the other fifteen keep their defaults).
+// Re-pinned for add-voice-orchestrator, limits: "The registry overrides a cap" (scenario "Override is reflected": the other twenty keep their defaults).
 test('a registry limits override is reflected and the other caps keep their defaults', async () => {
   const s = setup({ limits: { staleDays: 7 } })
   const r = await runCli(['limits', '--json'], s.env)
   assert.equal(r.code, 0)
-  assert.deepEqual(JSON.parse(r.stdout), { ...SIXTEEN_CAPS, staleDays: 7 })
+  assert.deepEqual(JSON.parse(r.stdout), { ...TWENTY_ONE_CAPS, staleDays: 7 })
   const text = await runCli(['limits'], s.env)
   assert.match(text.stdout.split('\n')[0], /^staleDays\s+=\s+7  /)
 })
@@ -1819,5 +1855,388 @@ test('dial voice serves the page, takes a turn to a fake claude, streams a sente
     }, 'the fake claude to be gone')
   } finally {
     child.kill('SIGKILL')
+  }
+})
+
+// --- propose and sessions (specs/voice-sessions, add-voice-orchestrator) -------------------------------------
+
+/** A setup whose registry holds one repo per name, each a git directory under the user home; `dirs` maps name to path. */
+function proposeSetup({ names = ['katipon'], limits } = {}) {
+  const s = setup({ limits })
+  const dirs = Object.fromEntries(names.map(name => [name, repoIn(s.userHome, 'IdeaProjects', name)]))
+  writeJson(s.file, {
+    dial_schema: 'dial.registry/1',
+    vaults: s.vaults,
+    repos: names.map(name => ({ path: dirs[name], vault: 'personal', host: 'github' })),
+    limits: limits || {},
+  })
+  return { ...s, dirs }
+}
+
+/** A fake `claude` that records its arguments in `ran`, prints `output` and `stderr`, and exits `code`. */
+function fakeClaudeAgents({ output = '', stderr = '', code = 0 } = {}) {
+  const dir = tmp('sessions-bin-')
+  const ran = join(dir, 'ran.txt')
+  const out = join(dir, 'out.txt')
+  const err = join(dir, 'err.txt')
+  writeFileSync(out, output)
+  writeFileSync(err, stderr)
+  fakeBinary(dir, 'claude', `echo "$*" >> '${ran}'\ncat '${out}'\ncat '${err}' >&2\nexit ${code}`)
+  return { dir, ran, path: `${dir}:${process.env.PATH}` }
+}
+
+const runPropose = (s, args, env = {}) => runCli(['propose', ...args], { ...s.env, ...env })
+
+// --- propose: the proposal is printed --------------------------------------------------------------------
+
+test('propose --json prints exactly one proposal object with the repo name and the trimmed prompt', async () => {
+  // Pins specs/voice-sessions/spec.md, "propose checks a repo and a prompt and prints the proposal" (scenario "The JSON form").
+  const s = proposeSetup()
+  const r = await runPropose(s, ['katipon', '--prompt', '  /interlock:ship add-parser  ', '--json'])
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  const parsed = JSON.parse(r.stdout)
+  assert.deepEqual(parsed, { proposal: { repo: 'katipon', prompt: '/interlock:ship add-parser' } })
+  assert.deepEqual(Object.keys(parsed), ['proposal'])
+  assert.deepEqual(Object.keys(parsed.proposal).sort(), ['prompt', 'repo'])
+})
+
+test('propose without --json prints two lines, the prompt on one line', async () => {
+  // Pins specs/voice-sessions/spec.md, "propose checks a repo and a prompt and prints the proposal" (scenario "The text form").
+  const s = proposeSetup()
+  const r = await runPropose(s, ['katipon', '--prompt', 'fix the parser\nand its test'])
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  assert.equal(r.stdout, 'proposal for katipon: fix the parser and its test\nnothing is started until it is confirmed in the dial voice window\n')
+})
+
+test('propose names a repo by a path inside it and prints the registered name', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "A repo named by its path".
+  const s = proposeSetup()
+  const inside = join(s.dirs.katipon, 'lib')
+  mkdirSync(inside, { recursive: true })
+  const r = await runPropose(s, [inside, '--prompt', 'run the tests', '--json'])
+  assert.equal(r.code, 0)
+  assert.equal(JSON.parse(r.stdout).proposal.repo, 'katipon')
+})
+
+// --- propose: what it refuses ----------------------------------------------------------------------------
+
+test('propose with a missing repo or a missing prompt is refused with its own reason', async () => {
+  // Pins specs/voice-sessions/spec.md, "propose refuses what cannot become a session" (scenario "A missing argument").
+  const s = proposeSetup()
+  const noRepo = await runPropose(s, ['--prompt', 'x'])
+  assert.equal(noRepo.code, 1)
+  assert.equal(noRepo.stdout, '')
+  assert.equal(noRepo.stderr, 'dial: propose needs <repo>\n')
+  const noPrompt = await runPropose(s, ['katipon'])
+  assert.equal(noPrompt.code, 1)
+  assert.equal(noPrompt.stdout, '')
+  assert.equal(noPrompt.stderr, 'dial: propose needs --prompt <text>\n')
+})
+
+test('propose for a repo that is not registered is refused', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "A repo that is not registered".
+  const s = proposeSetup()
+  const r = await runPropose(s, ['nowhere', '--prompt', 'x'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: nowhere is not a registered repo\n')
+})
+
+test('propose refuses a blank prompt and one longer than voiceTurnChars, and accepts one of exactly that length', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "A prompt that is blank or too long".
+  const s = proposeSetup()
+  const blank = await runPropose(s, ['katipon', '--prompt', '   '])
+  assert.equal(blank.code, 1)
+  assert.equal(blank.stderr, 'dial: prompt is empty\n')
+  const long = await runPropose(s, ['katipon', '--prompt', 'x'.repeat(2001)])
+  assert.equal(long.code, 1)
+  assert.equal(long.stdout, '')
+  assert.equal(long.stderr, 'dial: prompt longer than 2000 characters\n')
+  const exact = await runPropose(s, ['katipon', '--prompt', 'x'.repeat(2000), '--json'])
+  assert.equal(exact.code, 0)
+  assert.equal(JSON.parse(exact.stdout).proposal.prompt.length, 2000)
+})
+
+test('propose reads the length cap from the registry', async () => {
+  // Pins specs/voice-sessions/spec.md, "propose refuses what cannot become a session" (the cap is voiceTurnChars).
+  const s = proposeSetup({ limits: { voiceTurnChars: 10 } })
+  const r = await runPropose(s, ['katipon', '--prompt', 'x'.repeat(11)])
+  assert.equal(r.code, 1)
+  assert.equal(r.stderr, 'dial: prompt longer than 10 characters\n')
+  assert.equal((await runPropose(s, ['katipon', '--prompt', 'x'.repeat(10)])).code, 0)
+})
+
+test('propose refuses a prompt that could be read as an option', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "A prompt that could be read as an option".
+  const s = proposeSetup()
+  const r = await runPropose(s, ['katipon', '--prompt=--dangerously-skip-permissions'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: prompt cannot start with -\n')
+})
+
+test('propose refuses a control character, and accepts a line feed and a tab', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "A control character".
+  const s = proposeSetup()
+  for (const prompt of ['run\u001bthe tests', 'run\rthe tests', 'run\u007fthe tests']) {
+    const r = await runPropose(s, ['katipon', '--prompt', prompt])
+    assert.equal(r.code, 1, JSON.stringify(prompt))
+    assert.equal(r.stdout, '')
+    assert.equal(r.stderr, 'dial: prompt holds a control character\n', JSON.stringify(prompt))
+  }
+  const ok = await runPropose(s, ['katipon', '--prompt', 'run\nthe\ttests', '--json'])
+  assert.equal(ok.code, 0)
+  assert.equal(JSON.parse(ok.stdout).proposal.prompt, 'run\nthe\ttests')
+})
+
+test('every propose refusal is one dial: line and nothing on stdout', async () => {
+  // Pins specs/cli-shell, "Every failure is one reason line on stderr", for the refusals of propose.
+  const s = proposeSetup()
+  for (const args of [['--prompt', 'x'], ['katipon'], ['nowhere', '--prompt', 'x'], ['katipon', '--prompt', ' '], ['katipon', '--prompt=-x']]) {
+    const r = await runPropose(s, args)
+    assert.equal(r.code, 1, args.join(' '))
+    assert.equal(r.stdout, '', args.join(' '))
+    assertOneLine(r.stderr)
+  }
+})
+
+// --- propose: it starts nothing and writes nothing -------------------------------------------------------
+
+test('propose runs no program and leaves the home and the vaults byte-identical', async () => {
+  // Pins specs/voice-sessions/spec.md, "propose starts nothing and writes nothing" (scenario "No session is started").
+  const s = proposeSetup()
+  const bin = fakeClaudeAgents()
+  const before = { home: snapshotTree(s.home), personal: snapshotTree(s.vaults.personal), work: snapshotTree(s.vaults.work) }
+  const r = await runPropose(s, ['katipon', '--prompt', '/interlock:ship add-parser'], { PATH: bin.path })
+  assert.equal(r.code, 0)
+  assert.equal(existsSync(bin.ran), false, 'claude was not run')
+  assert.deepEqual(snapshotTree(s.home), before.home)
+  assert.deepEqual(snapshotTree(s.vaults.personal), before.personal)
+  assert.deepEqual(snapshotTree(s.vaults.work), before.work)
+})
+
+test('propose does not create a home that does not exist', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "The home is not created".
+  const home = absentHome()
+  const r = await runCli(['propose', 'katipon', '--prompt', 'x'], { DIAL_HOME: home, HOME: tmp('propose-user-') })
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: katipon is not a registered repo\n')
+  assert.equal(existsSync(home), false)
+})
+
+test('propose with a bad cap in the registry gives the reason limits gives', async () => {
+  // Pins specs/limits/spec.md, "The registry overrides a cap" (a bad cap is refused by every command that reads the registry).
+  const s = proposeSetup({ limits: { voiceTurnChars: 0 } })
+  const limits = await runCli(['limits'], s.env)
+  const r = await runPropose(s, ['katipon', '--prompt', 'x'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stderr, limits.stderr)
+})
+
+// --- sessions --------------------------------------------------------------------------------------------
+
+/** The entries `claude agents --json --all` prints: two sessions Dial named and three it did not. */
+function agentsOutput(dirs) {
+  return JSON.stringify([
+    { id: '0f3e9a11', cwd: dirs.dial, kind: 'background', startedAt: 1794895330000, sessionId: '0f3e9a11-b039-4dca-8847-cfb263166f6b', name: 'dial: /interlock:spec add voice capture', state: 'done' },
+    { id: 'c7b0ada6', cwd: dirs.katipon, kind: 'background', startedAt: 1794900099451, sessionId: 'c7b0ada6-b039-4dca-8847-cfb263166f6b', name: 'dial: /interlock:ship add-parser', state: 'blocked', waitingFor: 'permission prompt' },
+    { id: 'aaaaaaa1', cwd: dirs.dial, kind: 'background', startedAt: 1794895000000, name: 'integration apps setup guide', state: 'blocked' },
+    { id: 'aaaaaaa2', cwd: dirs.dial, kind: 'background', startedAt: 1794895000000, state: 'working' },
+    { id: 'aaaaaaa3', cwd: dirs.dial, kind: 'interactive', startedAt: 1794895000000, name: 'dial: not a background session', state: 'working' },
+  ])
+}
+
+const runSessions = (s, bin, args = [], env = {}) => runCli(['sessions', ...args], { ...s.env, PATH: bin.path, ...env })
+
+test('sessions runs claude agents --json --all once and prints one line per session, the later one first', async () => {
+  // Pins specs/voice-sessions/spec.md, "sessions lists Dial's sessions in a terminal" (scenario "Two sessions as text").
+  const s = proposeSetup({ names: ['katipon', 'dial'] })
+  const bin = fakeClaudeAgents({ output: agentsOutput(s.dirs) })
+  const r = await runSessions(s, bin)
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  assert.equal(
+    r.stdout,
+    'c7b0ada6  katipon  blocked (permission prompt)  2026-11-17T07:21:39.451Z  /interlock:ship add-parser\n' +
+    '0f3e9a11  dial  done  2026-11-17T06:02:10.000Z  /interlock:spec add voice capture\n'
+  )
+  assert.equal(readFileSync(bin.ran, 'utf8'), 'agents --json --all\n')
+})
+
+test('sessions --json prints one object with the key sessions, each element holding the eight fields', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "The JSON form".
+  const s = proposeSetup({ names: ['katipon', 'dial'] })
+  const bin = fakeClaudeAgents({ output: agentsOutput(s.dirs) })
+  const r = await runSessions(s, bin, ['--json'])
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  const parsed = JSON.parse(r.stdout)
+  assert.deepEqual(Object.keys(parsed), ['sessions'])
+  assert.equal(parsed.sessions.length, 2)
+  for (const session of parsed.sessions) {
+    assert.deepEqual(Object.keys(session).sort(), ['cwd', 'id', 'prompt', 'repo', 'sessionId', 'startedAt', 'state', 'waitingFor'])
+  }
+  assert.deepEqual(parsed.sessions.map(x => [x.id, x.repo, x.state, x.waitingFor]), [['c7b0ada6', 'katipon', 'blocked', 'permission prompt'], ['0f3e9a11', 'dial', 'done', null]])
+})
+
+test('sessions with no session Dial named prints no dial sessions, and {"sessions":[]} with --json', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "No sessions".
+  const s = proposeSetup({ names: ['katipon'] })
+  for (const output of ['[]', JSON.stringify([{ id: 'aaaaaaa1', cwd: s.dirs.katipon, kind: 'background', name: 'integration apps setup guide', state: 'blocked' }])]) {
+    const bin = fakeClaudeAgents({ output })
+    const text = await runSessions(s, bin)
+    assert.equal(text.code, 0)
+    assert.equal(text.stdout, 'no dial sessions\n')
+    const json = await runSessions(s, bin, ['--json'])
+    assert.equal(json.code, 0)
+    assert.deepEqual(JSON.parse(json.stdout), { sessions: [] })
+  }
+})
+
+test('sessions with no claude on PATH is refused', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "claude is missing".
+  const s = proposeSetup()
+  const r = await runCli(['sessions'], { ...s.env, PATH: tmp('sessions-empty-') })
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: claude is not on PATH\n')
+})
+
+test('sessions when claude agents fails reports its code and first stderr line', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "claude agents fails".
+  const s = proposeSetup()
+  const bin = fakeClaudeAgents({ code: 1, stderr: "error: unknown command 'agents'\n" })
+  const r = await runSessions(s, bin)
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, "dial: claude agents failed (exit 1): error: unknown command 'agents'\n")
+})
+
+test('sessions when claude agents prints text that is not a list is refused', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "Output that is not a list".
+  const s = proposeSetup()
+  for (const output of ['Dial sessions are listed below\n', '{}']) {
+    const r = await runSessions(s, fakeClaudeAgents({ output }))
+    assert.equal(r.code, 1, output)
+    assert.equal(r.stdout, '')
+    assert.equal(r.stderr, 'dial: claude agents did not print a session list\n', output)
+  }
+})
+
+test('sessions refuses a positional argument and runs nothing', async () => {
+  // Pins specs/voice-sessions/spec.md, scenario "A positional is refused".
+  const s = proposeSetup()
+  const bin = fakeClaudeAgents({ output: '[]' })
+  const r = await runSessions(s, bin, ['katipon'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: unexpected argument: katipon\n')
+  assert.equal(existsSync(bin.ran), false)
+})
+
+test('sessions does not create a home that does not exist', async () => {
+  // Pins specs/voice-sessions/spec.md, "sessions lists Dial's sessions in a terminal" (it SHALL NOT create the home).
+  const home = absentHome()
+  const bin = fakeClaudeAgents({ output: '[]' })
+  const r = await runCli(['sessions'], { DIAL_HOME: home, HOME: tmp('sessions-user-'), PATH: bin.path })
+  assert.equal(r.code, 0)
+  assert.equal(r.stdout, 'no dial sessions\n')
+  assert.equal(existsSync(home), false)
+})
+
+test('a session cap of zero is refused by limits, sessions and voice with the same reason, and nothing runs', async () => {
+  // Pins specs/limits/spec.md, "The registry overrides a cap" (add-voice-orchestrator delta, scenario "Session cap with a bad value").
+  const s = proposeSetup({ limits: { voiceSessionPollSeconds: 0 } })
+  const bin = fakeClaudeAgents({ output: '[]' })
+  const limits = await runCli(['limits'], { ...s.env, PATH: bin.path })
+  assert.equal(limits.code, 1)
+  assert.ok(limits.stderr.includes('voiceSessionPollSeconds'), limits.stderr)
+  assert.ok(limits.stderr.includes('positive integer'), limits.stderr)
+  const sessions = await runSessions(s, bin)
+  assert.equal(sessions.code, 1)
+  assert.equal(sessions.stdout, '')
+  assert.equal(sessions.stderr, limits.stderr)
+  const voice = await runCli(['voice'], { ...s.env, PATH: bin.path })
+  assert.equal(voice.code, 1)
+  assert.equal(voice.stderr, limits.stderr)
+  assert.equal(existsSync(bin.ran), false, 'claude was not run')
+})
+
+// --- voice: a proposal is confirmed, in this process ---------------------------------------------------------
+
+/** A request for a handler that takes `req` and `res`: a readable stream with method, url and headers. */
+function handlerRequest({ method, url, headers = {}, body }) {
+  const req = Readable.from(body === undefined ? [] : [Buffer.from(body)], { objectMode: false })
+  return Object.assign(req, { method, url, headers })
+}
+
+/** A response with what the voice server uses: writeHead, write, end and a close event. */
+function handlerResponse() {
+  const res = new EventEmitter()
+  res.status = null
+  res.chunks = []
+  res.ended = false
+  res.writeHead = status => { res.status = status; return res }
+  res.write = chunk => { if (!res.ended) res.chunks.push(String(chunk)); return true }
+  res.end = chunk => {
+    if (res.ended) return res
+    if (chunk !== undefined && chunk !== null) res.chunks.push(String(chunk))
+    res.ended = true
+    queueMicrotask(() => res.emit('close'))
+    return res
+  }
+  res.text = () => res.chunks.join('')
+  return res
+}
+
+test('a stream holding a dial propose result, then POST /confirm, runs claude with the four arguments in the registered path', async () => {
+  // Pins specs/voice-sessions/spec.md, "Confirm starts the open proposal" and "A confirmed proposal starts one
+  // claude background session" (scenario "The arguments"), through `main` with `fakeSpawn`.
+  const s = proposeSetup({ names: ['katipon'] })
+  const prompt = '/interlock:ship add-parser'
+  const v = launchVoice(['--no-open', '--port', '4100'], { home: s.home })
+  try {
+    await v.started()
+    const [, port, token] = ADDRESS_LINE.exec(v.stdout().split('\n')[0])
+    const handler = v.listens[0].handler
+    const host = `127.0.0.1:${port}`
+    const origin = `http://${host}`
+    const call = async (spec, res = handlerResponse()) => {
+      await handler(handlerRequest(spec), res)
+      return res
+    }
+    const post = (path, body) => call({ method: 'POST', url: path, headers: { host, origin, 'x-dial-token': token, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+
+    const events = handlerResponse()
+    await call({ method: 'GET', url: `/events?t=${token}`, headers: { host } }, events)
+    v.claude().line(startReport())
+    assert.equal((await post('/turn', { text: 'ship add-parser in katipon' })).status, 202)
+
+    const use = { type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: `dial propose katipon --prompt "${prompt}" --json` } }] } }
+    const output = { type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_1', content: JSON.stringify({ proposal: { repo: 'katipon', prompt } }) }] } }
+    for (const line of [use, output, { type: 'result', subtype: 'success', is_error: false }]) v.claude().line(JSON.stringify(line))
+    await until(() => events.text().includes('event: proposal'), 'the proposal event')
+    const data = events.text().split('\n\n').find(block => block.startsWith('event: proposal')).split('\ndata: ')[1]
+    const proposal = JSON.parse(data)
+    assert.deepEqual({ repo: proposal.repo, prompt: proposal.prompt, status: proposal.status }, { repo: 'katipon', prompt, status: 'pending' })
+    assert.equal(v.children.some(c => c.args[0] === '--bg'), false, 'nothing starts before the confirmation')
+
+    const confirmed = await post('/confirm', { id: proposal.id, spoken: false })
+    assert.equal(confirmed.status, 202)
+    await until(() => v.children.some(c => c.args[0] === '--bg'), 'claude --bg to start')
+    const starts = v.children.filter(c => c.args[0] === '--bg')
+    assert.equal(starts.length, 1)
+    assert.equal(basename(starts[0].file), 'claude')
+    assert.deepEqual(starts[0].args, ['--bg', '--name', `dial: ${prompt}`, prompt])
+    assert.equal(starts[0].cwd, s.dirs.katipon)
+
+    assert.equal(await v.finish(), 0)
+    assert.equal(v.children.some(c => c.args[0] === 'stop'), false, 'a session is not stopped when the command ends')
+  } finally {
+    // The server's keep-alive timer would hold the process open after a failed assertion.
+    await v.finish().catch(() => {})
   }
 })

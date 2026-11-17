@@ -90,7 +90,7 @@ The vault is the surface. Obsidian shows `Dial.base` (four views by state
 priority) and `Dial Summary.md`; the terminal shows `dial next` (every
 needs-me item, offline), `dial brief` (at most `briefLines` lines for one
 repo) and `dial context` (one repo's open pull requests with a ready verdict,
-items, Next and narrative, offline); `/dial:ask` answers a question from it. `dial voice` is the spoken form of the same answers: a loopback window where a Claude Code session limited to `dial next`, `dial context`, `dial brief`, `dial sync` and `dial repos` answers aloud. `dial report` reads the notes, the sync log and the daily log and prints
+items, Next and narrative, offline); `/dial:ask` answers a question from it. `dial voice` is the spoken form of the same answers: a loopback window where a Claude Code session limited to `dial next`, `dial context`, `dial brief`, `dial sync`, `dial repos`, `dial propose` and `dial sessions` answers aloud. That session may also run `dial propose`, which only prints a proposal for one repo and prompt: the window shows it, Dial reads it out, and a Claude Code background session starts only when the owner confirms it with a click or the word "confirm"; `dial sessions` lists the sessions Dial started, by their `dial: ` name. `dial report` reads the notes, the sync log and the daily log and prints
 indicators with their denominators, and `dial review --week` writes the weekly
 review asking archive, drop or re-spec of each stale item. A human or an agent
 adds meaning through `dial handoff` (a narrative entry and `- [ ]` lines) and

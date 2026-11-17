@@ -2,8 +2,11 @@ import assert from 'node:assert/strict'
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
-import { KILL_GRACE_MS, findOnPath, spawnChild } from '../lib/spawn.mjs'
-import { fakeBinary, tmp } from './helpers.mjs'
+import * as spawnModule from '../lib/spawn.mjs'
+import { fakeBinary, fakeSpawn, fakeTimers, tmp } from './helpers.mjs'
+
+// A namespace import, so a missing `runChild` fails its own cases and leaves the rest of the file loading.
+const { KILL_GRACE_MS, findOnPath, runChild, spawnChild } = spawnModule
 
 const SH = '/bin/sh'
 const ENV = { PATH: process.env.PATH }
@@ -312,4 +315,113 @@ test('findOnPath returns null for no match, an empty PATH and a missing PATH', (
   assert.equal(findOnPath({ PATH: dir }, 'tool'), null)
   assert.equal(findOnPath({ PATH: '' }, 'tool'), null)
   assert.equal(findOnPath({}, 'tool'), null)
+})
+
+// ---------------------------------------------------------------- runChild
+// design §11 Interfaces: runChild(spawn, file, args, { cwd, env, timeoutMs, timers }) -> { done, kill }.
+// It is the bounded one-shot run behind every `claude --bg|agents|logs|stop` call; `done` never rejects.
+
+function runner(options = {}) {
+  const { spawn, children } = fakeSpawn()
+  const clock = fakeTimers()
+  const run = runChild(spawn, 'claude', ['agents', '--json'], { cwd: '/repos/katipon', env: { PATH: '/bin' }, timeoutMs: 10_000, timers: clock.timers, ...options })
+  return { run, children, advance: clock.advance }
+}
+
+test('runChild: the child is started with the file, the arguments, the cwd and the env', () => {
+  const { children } = runner()
+  assert.equal(children.length, 1)
+  assert.equal(children[0].file, 'claude')
+  assert.deepEqual(children[0].args, ['agents', '--json'])
+  assert.equal(children[0].cwd, '/repos/katipon')
+  assert.deepEqual(children[0].env, { PATH: '/bin' })
+})
+
+test('runChild: exit 0 resolves ok with the lines joined by a line feed', async () => {
+  const { run, children } = runner()
+  children[0].line('a')
+  children[0].line('b')
+  children[0].exit({ code: 0 })
+  const result = await run.done
+  assert.equal(result.ok, true)
+  assert.equal(result.code, 0)
+  assert.equal(result.stdout, 'a\nb')
+  assert.equal(result.timedOut, false)
+  assert.equal(result.missing, false)
+})
+
+test('runChild: a non-zero exit is not ok and keeps its code and stderr', async () => {
+  const { run, children } = runner()
+  children[0].exit({ code: 1, stderr: "error: unknown option '--json'\n" })
+  const result = await run.done
+  assert.equal(result.ok, false)
+  assert.equal(result.code, 1)
+  assert.equal(result.stderr, "error: unknown option '--json'\n")
+})
+
+test('runChild: a signal exit is not ok and names the signal', async () => {
+  const { run, children } = runner()
+  children[0].exit({ code: null, signal: 'SIGKILL' })
+  const result = await run.done
+  assert.equal(result.ok, false)
+  assert.equal(result.signal, 'SIGKILL')
+})
+
+test('runChild: a program that cannot be started resolves missing for ENOENT, and never rejects', async () => {
+  const { run, children } = runner()
+  children[0].exit({ code: null, error: { code: 'ENOENT', message: 'spawn claude ENOENT' } })
+  const result = await run.done
+  assert.equal(result.ok, false)
+  assert.equal(result.missing, true)
+  assert.equal(result.error.code, 'ENOENT')
+  const other = runner()
+  other.children[0].exit({ code: null, error: { code: 'EACCES', message: 'spawn claude EACCES' } })
+  const second = await other.run.done
+  assert.equal(second.ok, false)
+  assert.equal(second.missing, false)
+  assert.equal(second.error.code, 'EACCES')
+})
+
+test('runChild: after timeoutMs the child is killed, and timedOut is true once it exits', async () => {
+  const { run, children, advance } = runner({ timeoutMs: 10_000 })
+  advance(9_999)
+  assert.equal(children[0].killed, false)
+  advance(1)
+  assert.equal(children[0].killed, true)
+  children[0].exit({ code: null, signal: 'SIGTERM' })
+  const result = await run.done
+  assert.equal(result.timedOut, true)
+  assert.equal(result.ok, false)
+})
+
+test('runChild: a child that exits in time is not killed later and is not timed out', async () => {
+  const { run, children, advance } = runner({ timeoutMs: 10_000 })
+  children[0].exit({ code: 0 })
+  const result = await run.done
+  advance(60_000)
+  assert.equal(children[0].killed, false)
+  assert.equal(result.timedOut, false)
+})
+
+test('runChild: kill() ends the child and done resolves after its exit', async () => {
+  const { run, children } = runner()
+  let settled = false
+  run.done.then(() => {
+    settled = true
+  })
+  run.kill()
+  assert.equal(children[0].killed, true)
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(settled, false, 'done waits for the exit')
+  children[0].exit({ code: null, signal: 'SIGTERM' })
+  const result = await run.done
+  assert.equal(result.ok, false)
+})
+
+test('runChild with the real spawnChild: /bin/sh -c "echo a; echo b" is ok with the two lines', T, async () => {
+  const run = runChild(spawnChild, SH, ['-c', 'echo a; echo b'], { env: ENV, timeoutMs: 10_000, timers: { setTimeout, clearTimeout, setInterval, clearInterval } })
+  const result = await run.done
+  assert.equal(result.ok, true)
+  assert.equal(result.code, 0)
+  assert.equal(result.stdout, 'a\nb')
 })
