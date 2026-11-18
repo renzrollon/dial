@@ -7,6 +7,10 @@
 <link rel="stylesheet" href="/page.css">
 </head>
 <body>
+<div class="shell">
+<div class="stage-wrap">
+  <canvas id="stage" aria-hidden="true"></canvas>
+</div>
 <main>
   <h1>Dial voice</h1>
   <p class="purpose">Ask Dial aloud while you work: it checks your repos and answers in a sentence.</p>
@@ -16,6 +20,7 @@
     <button type="button" id="mute" aria-pressed="false">Mute</button>
     <button type="button" id="stop">Stop</button>
     <button type="button" id="quit">Quit</button>
+    <button type="button" id="fullscreen">Full screen</button>
   </div>
 
   <p id="status" role="status" tabindex="-1">Not started</p>
@@ -59,6 +64,7 @@
     <input type="text" id="turn" name="turn">
   </form>
 </main>
+</div>
 <script type="module" src="/page.js"></script>
 </body>
 </html>

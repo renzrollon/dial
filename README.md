@@ -423,6 +423,8 @@ dial <command> [options]
   context [<repo>]             open pull requests with a ready verdict, items, Next and narrative, offline (--json)
   handoff <repo> [<change>] (--stdin | --text <t>) [--source <label>] [--next <text>]...
                                prepend a dated narrative entry to a note (--json)
+  capture --vault <name> (--stdin | --text <t>) [--dry-run]
+                               write a new note into a vault's Inbox (--json)
   narrate <repo> [<change>] --transcript <path> [--turns <n>] [--dry-run], or narrate --eval <dir>
                                ask a local model for the five narrative lines (--json)
   record --event SessionEnd|PreCompact
@@ -475,6 +477,10 @@ accept it, and then print one two-space-indented JSON document.
 - `handoff <repo> [<change>]` prepends a dated narrative entry to a note, from
   `--stdin` or `--text`, labelled by `--source`, and appends each `--next` as a
   `- [ ]` line.
+- `capture --vault <name> (--stdin | --text <t>)` writes one new note under
+  `Inbox/` in that vault, never over an existing one. The text is redacted for
+  secret shapes, not for personal prose. `--dry-run` prints the path and
+  writes nothing.
 - `narrate <repo> [<change>] --transcript <path>` asks a local model for five
   labelled lines (`Done:`, `Decided:`, `Next:`, `Blocked:`, `Open:`) from the
   last `--turns` turns and writes them as a narrative entry; `--dry-run` prints
@@ -500,18 +506,34 @@ accept it, and then print one two-space-indented JSON document.
   address with a token made new for each launch, and opens it in Chrome as an
   app window on macOS (`--no-open` skips that). Turns are answered by a Claude
   Code session (`--model`, default `sonnet`) that loads none of your Claude
-  Code setup and may run seven commands only: `dial next`, `dial context`,
-  `dial brief`, `dial sync`, `dial repos`, `dial propose` and `dial sessions`.
+  Code setup and may run eight commands only: `dial next`, `dial context`,
+  `dial brief`, `dial sync`, `dial repos`, `dial propose`, `dial sessions` and
+  `dial capture`.
   It can draft a Claude Code session for one repo, which starts only when you
   confirm it, by a click or by the word "confirm" after Dial has read it out;
   the window lists the sessions it started with their state, their screen as
-  text, Stop and a Terminal control. Replies are shown sentence by
+  text, Stop and a Terminal control. You can ask Dial to take a note into a
+  vault and it reads back what it wrote; a spoken note reaches Claude as every
+  turn does before it is written. Replies are shown sentence by
   sentence and spoken with `say` (`--say-voice` picks the voice); without
   `say` they are only shown. Speech is recognized on the device in `--lang`
   (default `en-US`), or not at all, and typed turns always work. It ends on
   Quit, on SIGINT or SIGTERM, or `voiceCloseSeconds` after its last window
   closes, and exits 1 when the session was refused. It needs `claude` and
-  `dial` on `PATH` and takes no `--json`.
+  `dial` on `PATH` and takes no `--json`. The window shows a clockwork, and
+  goes full screen on Start. Escape, leaving full screen or a click on the
+  mechanism stops Dial. Nothing animates under the system's reduced-motion
+  setting. What each part shows:
+
+  | Part | Shows |
+  |---|---|
+  | Balance, lever, escape wheel | Dial can hear you now: one beat a second |
+  | Barrel | you are speaking: one notch per three words |
+  | Going train | Dial is thinking or speaking |
+  | Hand | sentences of the reply so far |
+  | Twelve sub-dials | one session each: working, blocked, done or failed |
+  | Reserve arc | time left on an open proposal |
+
 - `propose <repo> --prompt <text>` checks a repo (a name or a path inside it)
   and a prompt and prints the proposal, as two lines or, with `--json`, as
   `{ "proposal": { "repo", "prompt" } }`. It starts nothing and writes nothing:
@@ -658,6 +680,7 @@ its host.
 | `voiceSessionRows` | 12 | maximum sessions listed |
 | `voiceLogLines` | 200 | maximum lines of a session's screen shown |
 | `voiceProposalSeconds` | 120 | seconds before an unconfirmed proposal expires |
+| `captureChars` | 2000 | maximum characters in a captured note |
 
 An unknown cap name or a non-positive-integer value is refused, naming the key
 and the file.
@@ -760,5 +783,6 @@ prints the full report.
   LaunchAgent. Sessions started from `dial voice` are Claude Code background
   sessions, listed by `claude agents`, and keep running after the window closes.
 - Dial does not start a session unconfirmed, choose its permission mode, or answer its prompts.
+- Dial does not read or search notes it did not write.
 - `dial voice` is no daemon or app: it runs in the foreground, and needs
   `claude` and `dial` on `PATH`.

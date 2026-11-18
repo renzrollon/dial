@@ -360,7 +360,8 @@ export function fakeSpawn() {
 
 /**
  * A manual clock with the four timer functions of the globals. Returns
- * `{ timers, advance(ms) }`; `timers` is `{ setTimeout, clearTimeout,
+ * `{ timers, advance(ms), now() }`; `now()` is the fake time in milliseconds, 0 at
+ * the start and moved by `advance`; `timers` is `{ setTimeout, clearTimeout,
  * setInterval, clearInterval }` and nothing runs until `advance(ms)` moves the
  * clock forward, running every timeout and interval that falls due in time
  * order (equal times in the order they were set). A timer set by a callback
@@ -408,5 +409,5 @@ export function fakeTimers() {
     }
     now = end
   }
-  return { timers, advance }
+  return { timers, advance, now: () => now }
 }

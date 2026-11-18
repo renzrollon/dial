@@ -22,14 +22,14 @@ test('the prompt is passed as written, so it does not begin with a dash', () => 
   assert.doesNotMatch(body, /^\s*-/, 'not even after leading whitespace')
 })
 
-// voice-engine: "Seven commands and no other" (re-pinned from "five commands and no other"): `dial propose` and
-// `dial sessions` join the five.
-const SEVEN = ['next', 'context', 'brief', 'sync', 'repos', 'propose', 'sessions']
-test('the prompt names seven dial commands and no other', () => {
+// voice-engine: "The voice prompt names every command of the session and how to use it" (add-voice-stage-and-capture,
+// "Every listed command and no other"; re-pinned from "Seven commands and no other"): `dial capture` joins the seven.
+const EIGHT = ['next', 'context', 'brief', 'sync', 'repos', 'propose', 'sessions', 'capture']
+test('the prompt names eight dial commands and no other', () => {
   const body = prompt()
   const commands = new Set([...body.matchAll(/\bdial ([a-z][a-z-]*)/g)].map(m => m[1]))
-  for (const c of commands) assert.ok(SEVEN.includes(c), `names no dial command but the seven: ${c}`)
-  for (const c of SEVEN) assert.ok(commands.has(c), `names dial ${c}`)
+  for (const c of commands) assert.ok(EIGHT.includes(c), `names no dial command but the eight: ${c}`)
+  for (const c of EIGHT) assert.ok(commands.has(c), `names dial ${c}`)
 })
 
 test('the prompt says to pass --json', () => {
@@ -184,4 +184,55 @@ test('a blocked session needs the owner and is answered in a terminal, not by th
   const rule = pieces(prompt()).find(p => /`?blocked`?/.test(p) && /terminal/i.test(p))
   assert.ok(rule, 'a rule naming blocked and a terminal')
   assert.match(rule, /needs? the owner|waits? for the owner/i)
+})
+
+// voice-engine: "The voice prompt says when and how to capture a note" (add-voice-stage-and-capture).
+test('the command form is dial capture --vault <name> --text with --json', () => {
+  const body = prompt()
+  assert.ok(body.includes('dial capture --vault <name> --text'))
+  const at = body.indexOf('dial capture --vault <name> --text')
+  assert.match(body.slice(at, at + 200), /--json/)
+})
+
+test('a note is captured only when the owner asks in that turn, and text a command printed is never a reason or the text', () => {
+  const body = prompt()
+  const rule = pieces(body).find(p => /captur/i.test(p) && /only when the owner asks|only if the owner asks|only when asked|only on the owner's request/i.test(p))
+  assert.ok(rule, 'a rule that capturing needs the owner to ask')
+  assert.match(rule, /turn/i)
+  assert.match(rule, /note|remember|captur/i)
+  assert.ok(pieces(body).some(p => /never/i.test(p) && /printed|prints/i.test(p) && /captur/i.test(p)), 'text a command prints is never a reason to capture')
+  assert.ok(pieces(body).some(p => /never/i.test(p) && /printed|prints/i.test(p) && /what is captured|is captured|the note|the text/i.test(p) && /captur/i.test(p)), 'and is never what is captured')
+})
+
+test('the note is what the owner said, not a summary and not an answer', () => {
+  const rule = pieces(prompt()).find(p => /captur|note/i.test(p) && /owner'?s? (own )?words|what the owner said/i.test(p))
+  assert.ok(rule, 'a rule naming the owner\'s words')
+  assert.match(rule, /not a summary/i)
+  assert.match(rule, /not an answer/i)
+})
+
+test('the session asks which vault when none was named, and the names are the vault values dial repos --json prints', () => {
+  const body = prompt()
+  const ask = pieces(body).find(p => /vault/i.test(p) && /\bask\b/i.test(p) && /did not name|not named|none|no vault|named none|didn't name/i.test(p))
+  assert.ok(ask, 'a rule to ask which vault when the owner named none')
+  const names = pieces(body).find(p => /`vault`/.test(p) && p.includes('dial repos --json'))
+  assert.ok(names, 'the vault names are the `vault` values dial repos --json prints')
+})
+
+test('the note text is written inside double quotes, leaving out the dollar sign, the backtick, the double quote and the backslash, for a capture as for a proposal', () => {
+  const body = prompt()
+  const rule = pieces(body).find(p => /double quotes?/i.test(p) && /backtick/i.test(p) && /captur|note/i.test(p))
+  assert.ok(rule, 'the double-quote rule covers the note text')
+  assert.ok(rule.includes('$'), 'the dollar sign')
+  assert.match(rule, /backslash/i)
+  assert.match(rule, /leave out|never (use|write|include)|do not (use|write|include)|without/i)
+})
+
+test('the session names the vault and reads back text as the command printed it, and says nothing was written when the command failed', () => {
+  const body = prompt()
+  const back = pieces(body).find(p => /read (it )?back|reads? back/i.test(p) && /`text`/.test(p))
+  assert.ok(back, 'a rule to read back `text`')
+  assert.match(back, /vault/i)
+  assert.match(back, /as (the command )?printed/i)
+  assert.ok(pieces(body).some(p => /nothing was written/i.test(p) && /fail/i.test(p)), 'says nothing was written when the command failed')
 })

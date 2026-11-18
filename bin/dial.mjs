@@ -10,6 +10,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { formatResult, install, status, uninstall } from '../lib/agent.mjs'
 import { brief, formatBrief, hookEnvelope } from '../lib/brief.mjs'
+import { capture } from '../lib/capture.mjs'
 import { context, formatContext } from '../lib/context.mjs'
 import { diagnose, formatDoctor, probeNarrate } from '../lib/doctor.mjs'
 import { ensureHome, HomeUnwritable, resolveHome } from '../lib/home.mjs'
@@ -54,6 +55,8 @@ Commands:
                                offline (--json)
   handoff <repo> [<change>] (--stdin | --text <t>) [--source <label>] [--next <text>]...
                                prepend a dated narrative entry to a note (--json)
+  capture --vault <name> (--stdin | --text <t>) [--dry-run]
+                               write a new note into a vault's Inbox (--json)
   narrate <repo> [<change>] --transcript <path> [--turns <n>] [--dry-run], or narrate --eval <dir>
                                ask a local model for the five narrative lines (--json)
   record --event SessionEnd|PreCompact
@@ -92,6 +95,7 @@ const COMMANDS = {
   brief: { options: { hook: 'flag', session: 'value', json: 'flag' }, args: 1 },
   context: { options: { json: 'flag' }, args: 1 },
   handoff: { options: { stdin: 'flag', text: 'value', source: 'value', next: 'list', json: 'flag' }, args: 2 },
+  capture: { options: { vault: 'value', stdin: 'flag', text: 'value', 'dry-run': 'flag', json: 'flag' }, args: 0 },
   narrate: { options: { transcript: 'value', turns: 'value', 'dry-run': 'flag', eval: 'value', json: 'flag' }, args: 2 },
   record: { options: { event: 'value', json: 'flag' }, args: 0 },
   drop: { options: { json: 'flag' }, args: 2 },
@@ -683,6 +687,22 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
       out(options.json
         ? json({ note: result.note, wikilink: result.wikilink, heading: result.heading, nextAdded: result.nextAdded })
         : `${result.wikilink}\n`)
+      return 0
+    }
+
+    case 'capture': {
+      if (options.vault === undefined || options.vault === '') throw new Refusal('capture needs --vault <name>')
+      if (!!options.stdin === (options.text !== undefined)) throw new Refusal('capture needs exactly one of --stdin or --text')
+      const text = options.stdin ? readStdin() : options.text
+      const registry = loadOrRefuse(home)
+      const limits = limitsOrRefuse(registry, home)
+      const result = capture({
+        registry, vault: options.vault, text, now: clockOf(env), maxChars: limits.captureChars, dryRun: !!options['dry-run'],
+        warn: line => err(`${line}\n`),
+      })
+      if (!result.ok) throw new Refusal(result.reason)
+      const { ok, ...fields } = result
+      out(options.json ? json(fields) : `${result.written ? 'created' : 'create'} ${result.path}\n`)
       return 0
     }
 

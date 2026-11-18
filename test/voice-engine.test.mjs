@@ -6,11 +6,12 @@ const ID = '3f2b8c1e-9d4a-4c7e-8a51-0b6d2e9f7a10'
 const PROMPT = 'You are Dial, speaking.\nAnswer in short sentences.'
 
 // voice-engine: "The session may run the listed dial commands and nothing else" (re-pinned from "five": the list now
-// holds seven entries, the last two being `dial propose` and `dial sessions`).
+// holds seven entries, the last two being `dial propose` and `dial sessions`). Re-pinned again for add-voice-stage-and-capture,
+// the same requirement: the list holds eight entries and `dial capture` is the last.
 test('ALLOWED_TOOLS is the one command list, character for character', () => {
   assert.equal(
     ALLOWED_TOOLS,
-    'Bash(dial next:*),Bash(dial context:*),Bash(dial brief:*),Bash(dial sync:*),Bash(dial repos:*),Bash(dial propose:*),Bash(dial sessions:*)'
+    'Bash(dial next:*),Bash(dial context:*),Bash(dial brief:*),Bash(dial sync:*),Bash(dial repos:*),Bash(dial propose:*),Bash(dial sessions:*),Bash(dial capture:*)'
   )
   for (const name of ['handoff', 'record', 'drop', 'register', 'unregister', 'agent', 'vault', 'narrate', 'voice']) {
     assert.equal(ALLOWED_TOOLS.includes(`dial ${name}`), false, name)
@@ -20,11 +21,19 @@ test('ALLOWED_TOOLS is the one command list, character for character', () => {
 // voice-engine: "Nothing in the list starts a session".
 test('every entry of ALLOWED_TOOLS begins with Bash(dial and none names claude', () => {
   const entries = ALLOWED_TOOLS.split(',')
-  assert.equal(entries.length, 7)
+  assert.equal(entries.length, 8) // re-pinned from 7 for add-voice-stage-and-capture: "The session may run the listed dial commands and nothing else"
   for (const entry of entries) {
     assert.ok(entry.startsWith('Bash(dial '), entry)
     assert.equal(entry.includes('claude'), false, entry)
   }
+})
+
+// voice-engine: "Capture is the last entry".
+test('capture is the last entry: eight entries and the last is Bash(dial capture:*)', () => {
+  const entries = ALLOWED_TOOLS.split(',')
+  assert.equal(entries.length, 8)
+  assert.equal(entries.at(-1), 'Bash(dial capture:*)')
+  assert.equal(entries.filter(entry => entry === 'Bash(dial capture:*)').length, 1)
 })
 
 // voice-engine: "The whole argument list, in order".
@@ -203,6 +212,19 @@ test('a tool_use not named Bash, or with no string command, gives no tool effect
 test('a tool result is not shown or spoken', () => {
   const r = createReducer()
   const result = line({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 't1', content: 'secret output' }] } })
+  assert.deepEqual(r.feed(result), [])
+})
+
+// voice-engine: "A command the session runs is shown and not spoken" for `dial capture`: its use is one tool effect and
+// its result, which holds the note's text, gives none.
+test('a dial capture command is one tool effect, and its result gives no effect', () => {
+  const r = createReducer()
+  const command = 'dial capture --vault personal --text "call the dentist before Friday" --json'
+  assert.deepEqual(r.feed(assistant([{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command } }])), [{ type: 'tool', command }])
+  const result = line({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c1', content: '{"vault":"personal","text":"call the dentist before Friday"}' }] }
+  })
   assert.deepEqual(r.feed(result), [])
 })
 

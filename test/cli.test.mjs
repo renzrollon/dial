@@ -10,7 +10,7 @@ import { request as httpRequest } from 'node:http'
 import { createServer } from 'node:net'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { main } from '../bin/dial.mjs'
 import {
@@ -20,12 +20,13 @@ import {
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 const VERSION = readJson(join(dirname(BIN), '..', 'package.json')).version
 // Pins specs/cli-shell/spec.md, "Usage is printed on request and never as an error" (scenario
-// "Usage names every command and environment variable"): the twenty-three commands, `context` (add-dial-ask) after
-// `brief`, `voice` (add-voice-ui) after `watch`, and `propose` and `sessions` (add-voice-orchestrator) after `voice`.
-// Re-pinned for add-voice-orchestrator, cli-shell: twenty-one commands became twenty-three.
+// "Usage names every command and environment variable"): the twenty-four commands, `context` (add-dial-ask) after
+// `brief`, `voice` (add-voice-ui) after `watch`, `propose` and `sessions` (add-voice-orchestrator) after `voice`, and
+// `capture` (add-voice-stage-and-capture) after `handoff`.
+// Re-pinned for add-voice-stage-and-capture, cli-shell: twenty-three commands became twenty-four.
 const COMMANDS = [
   'version', 'limits', 'doctor', 'register', 'unregister', 'repos', 'help', 'vault', 'sync', 'next', 'brief', 'context',
-  'handoff', 'narrate', 'record', 'drop', 'agent', 'watch', 'voice', 'propose', 'sessions', 'report', 'review',
+  'handoff', 'capture', 'narrate', 'record', 'drop', 'agent', 'watch', 'voice', 'propose', 'sessions', 'report', 'review',
 ]
 const ENV_VARS = ['DIAL_HOME', 'DIAL_NOW', 'DIAL_LAUNCHCTL_BIN', 'ESCAPEMENT_HOME', 'ESCAPEMENT_CHECKPOINT_URL']
 
@@ -78,7 +79,7 @@ test('--help after a command prints usage and exits 0', async () => {
 test('usage lists every command on its own line and ends with the Environment line naming the five variables', async () => {
   const r = await runCli(['help'], { DIAL_HOME: makeHome() })
   const lines = r.stdout.split('\n')
-  assert.equal(COMMANDS.length, 23, 'the twenty-three commands of cli-shell: Usage names every command and environment variable')
+  assert.equal(COMMANDS.length, 24, 'the twenty-four commands of cli-shell: Usage names every command and environment variable')
   for (const cmd of COMMANDS) {
     assert.ok(
       lines.some(l => new RegExp(`^\\s*(dial\\s+)?${cmd}\\b`).test(l)),
@@ -155,6 +156,28 @@ test('the propose and sessions lines follow the voice lines, propose names <repo
   const sessionsBlock = lines.slice(sessions, entryAfter(sessions)).join('\n')
   assert.ok(sessionsBlock.includes('--json'), sessionsBlock)
   assert.ok(sessionsBlock.includes('list the Claude Code sessions dial voice started (--json)'), sessionsBlock)
+})
+
+test('the capture line directly follows the two handoff lines, names --vault <name>, (--stdin | --text <t>) and [--dry-run], and its description names Inbox and --json', async () => {
+  // Pins specs/cli-shell/spec.md (add-voice-stage-and-capture delta), "Usage is printed on request and never as an error"
+  // (scenario "The capture line follows the handoff lines").
+  const r = await runCli(['help'], { DIAL_HOME: makeHome() })
+  const lines = r.stdout.split('\n')
+  const entryAt = name => lines.findIndex(l => new RegExp(`^ {2}${name}\\b`).test(l))
+  const entryAfter = at => lines.findIndex((l, i) => i > at && /^ {2}\S/.test(l))
+  const [handoff, capture, narrate] = ['handoff', 'capture', 'narrate'].map(entryAt)
+  assert.ok(handoff >= 0 && capture > handoff && narrate > capture, 'usage has handoff, capture and narrate entries in that order')
+  assert.equal(capture - handoff, 2, 'the handoff entry is two lines')
+  assert.equal(entryAfter(handoff), capture, `the first entry after handoff is capture, got ${JSON.stringify(lines[entryAfter(handoff)])}`)
+  assert.equal(entryAfter(capture), narrate, `the first entry after capture is narrate, got ${JSON.stringify(lines[entryAfter(capture)])}`)
+  assert.equal(narrate - capture, 2, 'the capture entry is two lines')
+  const first = lines[capture]
+  for (const part of ['--vault <name>', '(--stdin | --text <t>)', '[--dry-run]']) assert.ok(first.includes(part), `${part} in ${first}`)
+  assert.match(first, /^ {2}capture --vault <name> \(--stdin \| --text <t>\) \[--dry-run\]\s*$/)
+  const description = lines[capture + 1]
+  assert.match(description, /^ {31}\S/, 'the description is on the next line at the description column')
+  assert.ok(description.includes('Inbox') && description.includes('--json'), description)
+  assert.equal(description.trim(), "write a new note into a vault's Inbox (--json)")
 })
 
 // --- version ----------------------------------------------------------------
@@ -273,11 +296,11 @@ test('repos --json is pretty-printed, parseable, newline-terminated, and nothing
   assert.deepEqual(parsed, [{ name: 'katipon', path: dir, vault: 'personal', host: 'github' }])
 })
 
-// Re-pinned for add-voice-orchestrator, limits: "Caps are available as JSON" (the twenty-one keys, in the published order).
+// Re-pinned for add-voice-stage-and-capture, limits: "Caps are available as JSON" (the twenty-two keys, in the published order).
 test('limits --json is pretty-printed', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
-  assert.equal(r.stdout, JSON.stringify(TWENTY_ONE_CAPS, null, 2) + '\n')
+  assert.equal(r.stdout, JSON.stringify(TWENTY_TWO_CAPS, null, 2) + '\n')
 })
 
 test('--json does not change the exit code: doctor --json exits 1 when a check fails, same as text', async () => {
@@ -300,8 +323,8 @@ test('--json does not change the exit code: doctor --json exits 1 when a check f
 // --- limits -----------------------------------------------------------------
 
 // Pins specs/limits/spec.md, "Every cap is published with a default and a description"
-// (add-voice-orchestrator delta, scenarios "Defaults with no registry" and "Every cap has a description"): twenty-one
-// caps, the five session caps last (sixteen before add-voice-orchestrator, the three voice caps last).
+// (add-voice-stage-and-capture delta, scenarios "Defaults with no registry" and "Every cap has a description"): twenty-two
+// caps, `captureChars` last (twenty-one before add-voice-stage-and-capture, the five session caps last).
 const SIXTEEN_CAPS = {
   staleDays: 14,
   archivedKeepDays: 30,
@@ -328,32 +351,34 @@ const TWENTY_ONE_CAPS = {
   voiceLogLines: 200,
   voiceProposalSeconds: 120
 }
+const TWENTY_TWO_CAPS = { ...TWENTY_ONE_CAPS, captureChars: 2000 }
 
-// Re-pinned for add-voice-orchestrator, limits: "Every cap is published with a default and a description" (sixteen lines became twenty-one).
-test('limits with no registry file prints exactly twenty-one caps in the published order and exits 0', async () => {
+// Re-pinned for add-voice-stage-and-capture, limits: "Every cap is published with a default and a description" (twenty-one lines became twenty-two).
+test('limits with no registry file prints exactly twenty-two caps in the published order and exits 0', async () => {
   const r = await runCli(['limits'], { DIAL_HOME: makeHome() })
   assert.equal(r.code, 0)
   assert.ok(r.stdout.endsWith('\n'))
   const lines = r.stdout.slice(0, -1).split('\n')
-  assert.equal(lines.length, 21)
+  assert.equal(lines.length, 22)
   for (const line of lines) assert.match(line, /^\S+\s+=\s+\d+  [a-z]/)
-  Object.entries(TWENTY_ONE_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
+  Object.entries(TWENTY_TWO_CAPS).forEach(([name, value], i) => assert.match(lines[i], new RegExp(`^${name}\\s+=\\s+${value}  `)))
   assert.ok(lines[3].endsWith('seconds before a git, gh, glab, interlock or claude session call is abandoned'), lines[3])
+  assert.ok(lines[21].startsWith('captureChars') && lines[21].endsWith('maximum characters in a captured note'), lines[21])
 })
 
-// Re-pinned for add-voice-orchestrator, limits: "Caps are available as JSON" (scenario "JSON caps": twenty-one keys).
+// Re-pinned for add-voice-stage-and-capture, limits: "Caps are available as JSON" (scenario "JSON caps": twenty-two keys).
 test('limits --json prints the defaults as an object', async () => {
   const r = await runCli(['limits', '--json'], { DIAL_HOME: makeHome() })
-  assert.deepEqual(JSON.parse(r.stdout), TWENTY_ONE_CAPS)
-  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(TWENTY_ONE_CAPS))
+  assert.deepEqual(JSON.parse(r.stdout), TWENTY_TWO_CAPS)
+  assert.deepEqual(Object.keys(JSON.parse(r.stdout)), Object.keys(TWENTY_TWO_CAPS))
 })
 
-// Re-pinned for add-voice-orchestrator, limits: "The registry overrides a cap" (scenario "Override is reflected": the other twenty keep their defaults).
+// Re-pinned for add-voice-stage-and-capture, limits: "The registry overrides a cap" (scenario "Override is reflected": the other twenty-one keep their defaults).
 test('a registry limits override is reflected and the other caps keep their defaults', async () => {
   const s = setup({ limits: { staleDays: 7 } })
   const r = await runCli(['limits', '--json'], s.env)
   assert.equal(r.code, 0)
-  assert.deepEqual(JSON.parse(r.stdout), { ...TWENTY_ONE_CAPS, staleDays: 7 })
+  assert.deepEqual(JSON.parse(r.stdout), { ...TWENTY_TWO_CAPS, staleDays: 7 })
   const text = await runCli(['limits'], s.env)
   assert.match(text.stdout.split('\n')[0], /^staleDays\s+=\s+7  /)
 })
@@ -2238,5 +2263,345 @@ test('a stream holding a dial propose result, then POST /confirm, runs claude wi
   } finally {
     // The server's keep-alive timer would hold the process open after a failed assertion.
     await v.finish().catch(() => {})
+  }
+})
+
+// --- capture (specs/capture, specs/cli-shell, specs/limits; add-voice-stage-and-capture) -----------------------
+
+const CAPTURE_NOW = '2026-11-17T09:05:00Z'
+const CAPTURE_FILE = 'Inbox/Buy oat milk 2026-11-17 0905.md'
+const CAPTURE_BYTES = [
+  '---', 'title: Buy oat milk', 'created: 2026-11-17', 'type: note', 'status: inbox', 'tags: [capture]',
+  'dial_schema: dial.capture/1', '---', '', 'Buy oat milk', '',
+].join('\n')
+const CAPTURE_TOKEN = 'ghp_0123456789abcdefghijABCDEFGHIJ012345'
+
+/** `setup()` with `DIAL_NOW` fixed, so the file name is the same on every run. */
+function captureSetup({ limits } = {}) {
+  const s = setup({ limits })
+  return { ...s, env: { ...s.env, DIAL_NOW: CAPTURE_NOW }, vault: s.vaults.personal }
+}
+
+const runCapture = (s, args, env = {}) => runCli(['capture', ...args], { ...s.env, ...env })
+
+/** Run the CLI with `input` piped to stdin. */
+function runCliWithInput(args, env, input) {
+  return new Promise(resolve => {
+    const child = execFile(process.execPath, [BIN, ...args], {
+      env: { PATH: process.env.PATH, TMPDIR: process.env.TMPDIR, HOME: tmp('cli-home-'), TZ: 'UTC', ...env },
+      timeout: 30_000,
+    }, (err, stdout, stderr) => resolve({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr }))
+    child.stdin.end(input)
+  })
+}
+
+test('capture --text writes one new note into Inbox, prints created <path> and exits 0', async () => {
+  // Pins specs/capture/spec.md, "capture writes one new note into a vault's Inbox" (scenarios "A note from --text" and
+  // "A vault without an Inbox"), and "A captured note holds frontmatter and the text" (scenario "The bytes of a note").
+  const s = captureSetup()
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'])
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  const path = join(s.vault, CAPTURE_FILE)
+  assert.equal(r.stdout, `created ${path}\n`)
+  assert.equal(readFileSync(path, 'utf8'), CAPTURE_BYTES)
+  assert.deepEqual(readdirSync(join(s.vault, 'Inbox')), ['Buy oat milk 2026-11-17 0905.md'])
+})
+
+test('capture --stdin names the note after the first line and keeps both lines in its text', async () => {
+  // Pins specs/capture/spec.md, "capture writes one new note into a vault's Inbox" (scenario "A note from stdin").
+  const s = captureSetup()
+  const r = await runCliWithInput(['capture', '--vault', 'personal', '--stdin'], s.env, 'Call the dentist\nbefore Friday\n')
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  const path = join(s.vault, 'Inbox/Call the dentist 2026-11-17 0905.md')
+  assert.equal(r.stdout, `created ${path}\n`)
+  const bytes = readFileSync(path, 'utf8')
+  assert.ok(bytes.includes('title: Call the dentist\n'), bytes)
+  assert.ok(bytes.endsWith('---\n\nCall the dentist\nbefore Friday\n'), bytes)
+})
+
+test('the file name carries the local time, which follows TZ', async () => {
+  // Pins specs/capture/spec.md, "capture writes one new note into a vault's Inbox" (scenario "Local time follows TZ").
+  const s = captureSetup()
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'], { TZ: 'Asia/Manila' })
+  assert.equal(r.code, 0)
+  assert.equal(r.stdout, `created ${join(s.vault, 'Inbox/Buy oat milk 2026-11-17 1705.md')}\n`)
+  assert.equal(existsSync(join(s.vault, 'Inbox/Buy oat milk 2026-11-17 1705.md')), true)
+})
+
+test('capture --json prints one two-space-indented object with the seven keys and no other', async () => {
+  // Pins specs/capture/spec.md, "capture prints what it wrote as JSON on request" (scenario "The JSON form").
+  const s = captureSetup()
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk', '--json'])
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  const parsed = JSON.parse(r.stdout)
+  assert.equal(r.stdout, JSON.stringify(parsed, null, 2) + '\n')
+  assert.deepEqual(parsed, {
+    vault: 'personal', path: join(s.vault, CAPTURE_FILE), note: CAPTURE_FILE, wikilink: '[[Buy oat milk 2026-11-17 0905]]',
+    title: 'Buy oat milk', text: 'Buy oat milk', written: true,
+  })
+  assert.deepEqual(Object.keys(parsed).sort(), ['note', 'path', 'text', 'title', 'vault', 'wikilink', 'written'])
+})
+
+test('the text in the JSON is the redacted text the note holds', async () => {
+  // Pins specs/capture/spec.md, "capture prints what it wrote as JSON on request" (scenario "The text is what was written")
+  // and "The text is cleaned and redacted before it is written" (scenario "A token in the text").
+  const s = captureSetup()
+  const r = await runCapture(s, ['--vault', 'personal', '--text', `rotate the key ${CAPTURE_TOKEN} today`, '--json'])
+  assert.equal(r.code, 0)
+  const parsed = JSON.parse(r.stdout)
+  assert.equal(parsed.text, 'rotate the key [redacted] today')
+  assert.equal(r.stdout.includes(CAPTURE_TOKEN), false)
+  const bytes = readFileSync(parsed.path, 'utf8')
+  assert.ok(bytes.endsWith('\n\nrotate the key [redacted] today\n'), bytes)
+  assert.equal(bytes.includes(CAPTURE_TOKEN), false)
+})
+
+test('capture refuses a missing --vault before anything else', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "No vault named").
+  const s = captureSetup()
+  for (const args of [['--text', 'x'], []]) {
+    const r = await runCapture(s, args)
+    assert.equal(r.code, 1, args.join(' '))
+    assert.equal(r.stdout, '')
+    assert.equal(r.stderr, 'dial: capture needs --vault <name>\n')
+  }
+})
+
+test('capture refuses neither or both of --stdin and --text', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "Neither or both sources").
+  const s = captureSetup()
+  for (const args of [['--vault', 'personal'], ['--vault', 'personal', '--text', 'x', '--stdin']]) {
+    const r = await runCliWithInput(['capture', ...args], s.env, 'from stdin\n')
+    assert.equal(r.code, 1, args.join(' '))
+    assert.equal(r.stdout, '')
+    assert.equal(r.stderr, 'dial: capture needs exactly one of --stdin or --text\n')
+  }
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+})
+
+test('capture refuses empty text from --text and from an empty stdin', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "Empty text").
+  const s = captureSetup()
+  const blank = await runCapture(s, ['--vault', 'personal', '--text', '   '])
+  assert.equal(blank.code, 1)
+  assert.equal(blank.stdout, '')
+  assert.equal(blank.stderr, 'dial: capture text is empty\n')
+  const empty = await runCliWithInput(['capture', '--vault', 'personal', '--stdin'], s.env, '')
+  assert.equal(empty.code, 1)
+  assert.equal(empty.stdout, '')
+  assert.equal(empty.stderr, 'dial: capture text is empty\n')
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+})
+
+test('capture refuses a text over the cap and writes one of exactly the cap', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "Text that is too long").
+  const s = captureSetup()
+  const over = await runCapture(s, ['--vault', 'personal', '--text', 'a'.repeat(2001)])
+  assert.equal(over.code, 1)
+  assert.equal(over.stdout, '')
+  assert.equal(over.stderr, 'dial: note longer than 2000 characters\n')
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+  const exact = await runCapture(s, ['--vault', 'personal', '--text', 'a'.repeat(2000)])
+  assert.equal(exact.code, 0)
+  assert.equal(readdirSync(join(s.vault, 'Inbox')).length, 1)
+})
+
+test('capture reads its cap from the registry', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "The cap is read from the registry")
+  // and specs/limits/spec.md, "The registry overrides a cap" (scenario "Override of the capture cap").
+  const s = captureSetup({ limits: { captureChars: 100 } })
+  const caps = await runCli(['limits', '--json'], s.env)
+  assert.deepEqual(JSON.parse(caps.stdout), { ...TWENTY_TWO_CAPS, captureChars: 100 })
+  assert.equal(caps.code, 0)
+  const over = await runCapture(s, ['--vault', 'personal', '--text', 'a'.repeat(101)])
+  assert.equal(over.code, 1)
+  assert.equal(over.stderr, 'dial: note longer than 100 characters\n')
+  const exact = await runCapture(s, ['--vault', 'personal', '--text', 'a'.repeat(100)])
+  assert.equal(exact.code, 0)
+})
+
+test('a capture cap of zero is refused by limits and by capture with the same reason, naming captureChars', async () => {
+  // Pins specs/limits/spec.md, "The registry overrides a cap" (scenario "Capture cap with a bad value").
+  const s = captureSetup({ limits: { captureChars: 0 } })
+  const limits = await runCli(['limits'], s.env)
+  assert.equal(limits.code, 1)
+  assert.equal(limits.stdout, '')
+  assertOneLine(limits.stderr)
+  assert.ok(limits.stderr.includes('captureChars'), limits.stderr)
+  assert.ok(limits.stderr.includes('positive integer'), limits.stderr)
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'x'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, limits.stderr)
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+})
+
+test('capture names the known vaults when the registry does not name the one given', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "A vault the registry does not name").
+  const s = captureSetup()
+  const r = await runCapture(s, ['--vault', 'nowhere', '--text', 'x'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: no vault named nowhere in the registry; vaults: personal, work\n')
+  const home = makeHome({ registry: { dial_schema: 'dial.registry/1', vaults: {}, repos: [], limits: {} } })
+  const none = await runCli(['capture', '--vault', 'nowhere', '--text', 'x'], { DIAL_HOME: home, HOME: tmp('user-home-'), DIAL_NOW: CAPTURE_NOW })
+  assert.equal(none.code, 1)
+  assert.equal(none.stdout, '')
+  assert.equal(none.stderr, 'dial: no vault named nowhere in the registry\n')
+})
+
+test('capture refuses a vault whose directory is gone and does not create it', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "A vault whose directory is gone").
+  const s = captureSetup()
+  const gone = join(tmp(), 'gone')
+  writeJson(s.file, { dial_schema: 'dial.registry/1', vaults: { personal: gone, work: s.vaults.work }, repos: [], limits: {} })
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'x'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, `dial: vault personal does not exist: ${gone}\n`)
+  assert.equal(existsSync(gone), false)
+})
+
+test('capture refuses a positional argument', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write" (scenario "A positional argument").
+  const s = captureSetup()
+  const r = await runCapture(s, ['note', '--vault', 'personal', '--text', 'x'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: unexpected argument: note\n')
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+})
+
+test('when two refusals apply, capture gives the first in the order of the spec', async () => {
+  // Pins specs/capture/spec.md, "capture refuses what it cannot write": --vault, the sources, the text, the vault name.
+  const s = captureSetup()
+  assert.equal((await runCapture(s, ['--vault', 'nowhere', '--text', '  '])).stderr, 'dial: capture text is empty\n')
+  assert.equal((await runCapture(s, ['--vault', 'nowhere', '--text', 'a'.repeat(2001)])).stderr, 'dial: note longer than 2000 characters\n')
+  assert.equal((await runCapture(s, ['--vault', 'nowhere'])).stderr, 'dial: capture needs exactly one of --stdin or --text\n')
+})
+
+test('a second identical capture in the same minute is refused and the first note keeps its bytes', async () => {
+  // Pins specs/capture/spec.md, "capture never overwrites, appends or deletes" (scenario "The same words in the same minute").
+  const s = captureSetup()
+  const first = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'])
+  assert.equal(first.code, 0)
+  const path = join(s.vault, CAPTURE_FILE)
+  const before = readFileSync(path, 'utf8')
+  const second = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'])
+  assert.equal(second.code, 1)
+  assert.equal(second.stdout, '')
+  assert.equal(second.stderr, `dial: ${CAPTURE_FILE} already exists in vault personal\n`)
+  assert.equal(readFileSync(path, 'utf8'), before)
+  assert.deepEqual(readdirSync(join(s.vault, 'Inbox')), ['Buy oat milk 2026-11-17 0905.md'])
+})
+
+test('capture refuses an Inbox that is a symbolic link out of the vault and writes nothing there', async () => {
+  // Pins specs/capture/spec.md, "capture never overwrites, appends or deletes" (scenario "An Inbox that leads out of the vault").
+  const s = captureSetup()
+  const outside = tmp('capture-outside-')
+  symlinkSync(outside, join(s.vault, 'Inbox'))
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assertOneLine(r.stderr)
+  assert.ok(r.stderr.startsWith('dial: refusing to write into '), r.stderr)
+  assert.deepEqual(readdirSync(outside), [])
+})
+
+test('a capture changes no other file of a vault that holds other notes', async () => {
+  // Pins specs/capture/spec.md, "capture never overwrites, appends or deletes" (scenario "Nothing else changes").
+  const s = captureSetup()
+  makeVault(s.vault, [
+    { path: 'Projects/katipon.md', frontmatter: { type: 'project' }, body: 'p\n' },
+    { path: 'Changes/katipon--add-login.md', frontmatter: { type: 'change' }, body: 'c\n' },
+    { path: 'Daily/2026-11-17.md', frontmatter: { type: 'daily' }, body: '## Log\n\n- one\n' },
+    { path: 'Inbox/Older 2026-11-10 0800.md', body: 'older\n' },
+    { path: '.obsidian/app.json', body: '{}\n' },
+  ])
+  const before = snapshotTree(s.vault)
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'])
+  assert.equal(r.code, 0)
+  const after = snapshotTree(s.vault)
+  assert.deepEqual(Object.keys(after).filter(k => !(k in before)), [CAPTURE_FILE])
+  for (const [k, v] of Object.entries(before)) assert.equal(after[k], v, k)
+})
+
+test('capture --dry-run prints create <path>, writes nothing, not even Inbox, and exits 0', async () => {
+  // Pins specs/capture/spec.md, "A dry run prints the plan and writes nothing" (scenario "A planned note").
+  const s = captureSetup()
+  const before = snapshotTree(s.vault)
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk', '--dry-run'])
+  assert.equal(r.code, 0)
+  assert.equal(r.stderr, '')
+  assert.equal(r.stdout, `create ${join(s.vault, CAPTURE_FILE)}\n`)
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+  assert.deepEqual(snapshotTree(s.vault), before)
+})
+
+test('capture --dry-run --json reports written false and writes nothing', async () => {
+  // Pins specs/capture/spec.md, "capture prints what it wrote as JSON on request" and "A dry run prints the plan and writes nothing".
+  const s = captureSetup()
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk', '--dry-run', '--json'])
+  assert.equal(r.code, 0)
+  const parsed = JSON.parse(r.stdout)
+  assert.equal(r.stdout, JSON.stringify(parsed, null, 2) + '\n')
+  assert.equal(parsed.written, false)
+  assert.equal(parsed.note, CAPTURE_FILE)
+  assert.equal(existsSync(join(s.vault, 'Inbox')), false)
+})
+
+test('a dry run of a note that exists exits 1 with the already exists reason', async () => {
+  // Pins specs/capture/spec.md, "A dry run prints the plan and writes nothing" (scenario "A dry run of a name that exists").
+  const s = captureSetup()
+  assert.equal((await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'])).code, 0)
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk', '--dry-run'])
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, `dial: ${CAPTURE_FILE} already exists in vault personal\n`)
+})
+
+test('capture does not create a home that does not exist', async () => {
+  // Pins specs/capture/spec.md, "capture creates no home and runs no program" (scenario "The home is not created").
+  const home = join(tmp(), 'never-created')
+  const r = await runCli(['capture', '--vault', 'personal', '--text', 'x'], { DIAL_HOME: home, HOME: tmp('user-home-'), DIAL_NOW: CAPTURE_NOW })
+  assert.equal(r.code, 1)
+  assert.equal(r.stdout, '')
+  assert.equal(r.stderr, 'dial: no vault named personal in the registry\n')
+  assert.equal(existsSync(home), false)
+})
+
+test('a successful capture runs none of git, gh, claude or open', async () => {
+  // Pins specs/capture/spec.md, "capture creates no home and runs no program" (scenario "No program is run").
+  const s = captureSetup()
+  const bin = tmp('capture-bin-')
+  const ran = join(bin, 'ran.txt')
+  for (const name of ['git', 'gh', 'claude', 'open']) fakeBinary(bin, name, `echo ${name} >> '${ran}'`)
+  const r = await runCapture(s, ['--vault', 'personal', '--text', 'Buy oat milk'], { PATH: bin })
+  assert.equal(r.code, 0, r.stderr)
+  assert.equal(readFileSync(join(s.vault, CAPTURE_FILE), 'utf8'), CAPTURE_BYTES)
+  assert.equal(existsSync(ran), false, 'a program was run')
+})
+
+test('capture, propose and sessions accept --json and print one two-space-indented document', async () => {
+  // Pins specs/cli-shell/spec.md (add-voice-stage-and-capture delta), "Read commands offer JSON output"
+  // (scenario "capture, propose and sessions accept --json").
+  const s = proposeSetup({ names: ['katipon'] })
+  const env = { ...s.env, DIAL_NOW: CAPTURE_NOW }
+  const bin = fakeClaudeAgents({ output: '[]' })
+  const runs = [
+    await runCli(['capture', '--vault', 'personal', '--text', 'x', '--dry-run', '--json'], env),
+    await runCli(['propose', 'katipon', '--prompt', 'x', '--json'], env),
+    await runCli(['sessions', '--json'], { ...env, PATH: bin.path }),
+  ]
+  for (const r of runs) {
+    assert.equal(r.code, 0, r.stderr)
+    assert.equal(r.stderr, '')
+    assert.ok(!r.stderr.includes('unknown option'), r.stderr)
+    const parsed = JSON.parse(r.stdout)
+    assert.equal(r.stdout, JSON.stringify(parsed, null, 2) + '\n')
   }
 })

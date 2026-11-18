@@ -122,3 +122,16 @@ test('fakeTimers runs due timeouts and intervals in time order and honours clear
   advance(1000)
   assert.equal(log.length, 7)
 })
+
+// design §14: `fakeTimers()` also returns `now()`, the fake time in milliseconds, 0 at the start and moved by `advance`.
+test('fakeTimers now() is 0 at the start and moves with advance, also inside a timer that runs', () => {
+  const { timers, advance, now } = fakeTimers()
+  assert.equal(now(), 0)
+  const seen = []
+  timers.setTimeout(() => seen.push(now()), 300)
+  advance(100)
+  assert.equal(now(), 100)
+  advance(250)
+  assert.deepEqual(seen, [300])
+  assert.equal(now(), 350)
+})

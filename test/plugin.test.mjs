@@ -135,6 +135,8 @@ test('npm pack lists every hook, skill and template', async () => {
     ...['AGENTS-dial-section.md', 'Daily.md', 'Dial Change.md', 'Dial Queries.md', 'Dial.base'].map(f => `templates/${f}`),
     // voice: "The assets are in the package" (add-voice-ui delta): the five files the page and the session read.
     ...['page.html', 'page.js', 'page-logic.mjs', 'page.css', 'prompt.md'].map(f => `lib/voice/${f}`),
+    // voice: "The assets are in the package" (add-voice-stage-and-capture delta): the three scripts of the stage join the list.
+    ...['gears.mjs', 'scene.mjs', 'stage.mjs'].map(f => `lib/voice/${f}`),
   ]
   for (const path of expected) assert.ok(packed.has(path), `${path} is packed`)
 })

@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { get as httpGet } from 'node:http'
 import { connect as netConnect, createServer } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { basename } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
-import { createVoice, listenLoopback } from '../lib/voice/server.mjs'
+import { createVoice, listenLoopback, loadVoiceFiles } from '../lib/voice/server.mjs'
 import { fakeBinary, fakeSpawn, fakeTimers, tmp } from './helpers.mjs'
 
 // Requirements of the `voice` delta ("voice runs in the foreground until it is
@@ -27,13 +28,18 @@ import { fakeBinary, fakeSpawn, fakeTimers, tmp } from './helpers.mjs'
 // delta the server joins (proposals, the reading, confirm and cancel, the bounds, the list, notices, the log,
 // stop and attach routes, the bounded claude calls), "Two pages see the same proposal and the same list" of
 // the `voice` delta and "A proposal is read from the result of dial propose" of the `voice-engine` delta.
+// The add-voice-stage-and-capture change adds "The scripts of the stage" of the `voice` delta near the other static
+// files, and, in the proposal section, "An open proposal's event says how long it has left" of the `voice-sessions` delta.
 // The rig answers `claude agents` by itself with a canned list (`agents`), so a test that is not about the
 // list needs nothing from it; `{ agents: 'manual' }` leaves each read to the test. The session calls
 // (`--bg`, `agents`, `logs`, `stop`) are told apart from the voice session by their first argument, and
 // `claudes()` holds the voice session's processes only.
 //
 // Choices this suite pins where design section 13 leaves a shape open:
-//  - `assets` is `{ page, script, logic, style }`, four strings.
+//  - `assets` is `{ page, script, logic, style }`, four strings; add-voice-stage-and-capture adds `gears`, `scene` and `stage`,
+//    seven strings, each served at `/<name>.mjs`.
+//  - `now` (milliseconds, `Date.now` when not given) is the clock the proposals count their time left on; the rig gives
+//    `fakeTimers`' `now`, so it moves with `advance`.
 //  - `limits` is `{ voiceTurnSeconds, voiceCloseSeconds, voiceTurnChars }`, all three given.
 //  - children are told apart by the base name of the file they run: `claude`, `say`, `open`.
 //  - whether `say` is available is read from `env.PATH` (an executable named `say` in it).
@@ -51,6 +57,9 @@ const ASSETS = {
   page: '<!doctype html><title>dial voice PAGE</title>',
   script: '// page.js SCRIPT',
   logic: '// page-logic.mjs LOGIC',
+  gears: '// gears.mjs GEARS',
+  scene: '// scene.mjs SCENE',
+  stage: '// stage.mjs STAGE',
   style: '/* page.css STYLE */'
 }
 const CLAUDE_PATH = '/opt/homebrew/bin/claude'
@@ -207,6 +216,7 @@ function rig(opts = {}) {
     assets: ASSETS,
     spawn,
     timers: clock.timers,
+    now: clock.now,
     uuid: () => `00000000-0000-4000-8000-${String(++uuids).padStart(12, '0')}`,
     platform,
     noOpen,
@@ -593,7 +603,9 @@ test('an event stream request with a wrong token or host is answered 403 and joi
 // ---------------------------------------------------------------------------
 // voice: "The page is served from the package under a strict policy"
 
-test('the four paths are served from the assets with their content types and the four headers', T, async () => {
+// Re-pinned for add-voice-stage-and-capture, voice: "The page is served from the package under a strict policy" (four
+// served paths and the page became seven: the page, the five scripts and the style).
+test('the seven paths are served from the assets with their content types and the four headers', T, async () => {
   const r = rig()
   await r.up()
   const cases = [
@@ -601,6 +613,9 @@ test('the four paths are served from the assets with their content types and the
     [`/?t=${TOKEN}`, 'page', /^text\/html; charset=utf-8$/],
     ['/page.js', 'script', /^(text|application)\/javascript\b/],
     ['/page-logic.mjs', 'logic', /^(text|application)\/javascript\b/],
+    ['/gears.mjs', 'gears', /^(text|application)\/javascript\b/],
+    ['/scene.mjs', 'scene', /^(text|application)\/javascript\b/],
+    ['/stage.mjs', 'stage', /^(text|application)\/javascript\b/],
     ['/page.css', 'style', /^text\/css\b/]
   ]
   for (const [path, key, type] of cases) {
@@ -622,6 +637,36 @@ test('the static files need the host and no token', T, async () => {
   assert.equal(res.status, 200)
   const wrong = await r.send({ method: 'GET', url: '/page.js', headers: { host: 'localhost:3425' } })
   assert.equal(wrong.status, 403)
+})
+
+// voice: "The scripts of the stage": 200, `text/javascript; charset=utf-8`, the four headers and the bytes of the shipped
+// file, with the right Host and no token.
+test('the scripts of the stage answer 200 text/javascript; charset=utf-8 with the four headers, the assets and no token', T, async () => {
+  const r = rig()
+  await r.up()
+  for (const name of ['gears', 'scene', 'stage']) {
+    const res = await r.send({ method: 'GET', url: `/${name}.mjs`, headers: { host: HOST } })
+    assert.equal(res.status, 200, name)
+    assert.equal(res.headers['content-type'], 'text/javascript; charset=utf-8', name)
+    assert.equal(res.body(), ASSETS[name], name)
+    assert.equal(res.headers['cache-control'], 'no-store', name)
+    assert.equal(res.headers['x-content-type-options'], 'nosniff', name)
+    assert.equal(res.headers['referrer-policy'], 'no-referrer', name)
+    assert.equal(res.headers['content-security-policy'], CSP, name)
+    const wrong = await r.send({ method: 'GET', url: `/${name}.mjs`, headers: { host: 'localhost:3425' } })
+    assert.equal(wrong.status, 403, `${name} with another host`)
+    const posted = await r.post(`/${name}.mjs`, {})
+    assert.equal(posted.status, 405, `${name} by POST`)
+  }
+})
+
+// voice: "The scripts of the stage": "the bytes of the shipped file". The loader reads the three files beside the others.
+test('loadVoiceFiles reads gears.mjs, scene.mjs and stage.mjs from the package as the assets gears, scene and stage', () => {
+  const out = loadVoiceFiles()
+  assert.equal(out.ok, true, out.reason)
+  for (const name of ['gears', 'scene', 'stage']) {
+    assert.equal(out.assets[name], readFileSync(new URL(`../lib/voice/${name}.mjs`, import.meta.url), 'utf8'), name)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -1611,7 +1656,9 @@ test('a proposal is sent to every page as pending with an 8-character id', T, as
     assert.equal(page.of('proposal').length, 1)
     const [p] = page.of('proposal')
     assert.match(p.id, /^[0-9a-f]{8}$/)
-    assert.deepEqual(Object.keys(p).sort(), ['id', 'prompt', 'repo', 'status'])
+    // Re-pinned for add-voice-stage-and-capture, voice-sessions: "An open proposal's event says how long it has left"
+    // (an open proposal's event also carries `seconds` and `secondsLeft`).
+    assert.deepEqual(Object.keys(p).sort(), ['id', 'prompt', 'repo', 'secondsLeft', 'seconds', 'status'].sort())
     assert.deepEqual(shape(p), { repo: 'katipon', prompt: SHIP, status: 'pending' })
   }
   assert.equal(a.of('proposal')[0].id, b.of('proposal')[0].id)
@@ -1667,6 +1714,89 @@ test('a newer proposal replaces the open one: the first is replaced, then the se
   assert.notEqual(first.id, second.id)
   assert.equal((await confirm(r, first.id)).status, 409, 'the replaced proposal is closed')
   assert.equal((await confirm(r, second.id)).status, 202)
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "An open proposal's event says how long it has left"
+
+const timeLeft = p => ({ seconds: p.seconds, secondsLeft: p.secondsLeft })
+const hasTime = p => Object.hasOwn(p, 'seconds') || Object.hasOwn(p, 'secondsLeft')
+
+test('a new proposal is sent pending with seconds 120 and secondsLeft 120', T, async () => {
+  const { page } = await drafted({ say: false })
+  assert.deepEqual(page.of('proposal').map(p => [p.status, ...Object.values(timeLeft(p))]), [['pending', 120, 120]])
+})
+
+test('seconds is the value of voiceProposalSeconds: 30 gives seconds 30 and secondsLeft 30', T, async () => {
+  const { page } = await drafted({ say: false, limits: { voiceProposalSeconds: 30 } })
+  assert.deepEqual(timeLeft(page.of('proposal')[0]), { seconds: 30, secondsLeft: 30 })
+})
+
+test('read aloud later: the read event says seconds 120 and secondsLeft 30 after 90 seconds', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, { end: false })
+  await r.advance(90_000)
+  r.claudes()[0].line(result())
+  await settle()
+  await speakAll(r)
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+  assert.deepEqual(timeLeft(page.of('proposal')[0]), { seconds: 120, secondsLeft: 120 }, 'the pending event keeps its number')
+  assert.deepEqual(timeLeft(page.of('proposal')[1]), { seconds: 120, secondsLeft: 30 })
+})
+
+test('a page that connects 100 seconds after the proposal became open is sent secondsLeft 20', T, async () => {
+  const { r, page } = await drafted({ say: false })
+  await r.advance(100_000)
+  const late = await r.connect()
+  assert.deepEqual(late.of('proposal').map(p => [p.status, ...Object.values(timeLeft(p))]), [['pending', 120, 20]])
+  assert.equal(page.of('proposal')[0].secondsLeft, 120, 'the page that was there keeps the event it was sent')
+})
+
+test('a page that connects 99.5 seconds after the proposal became open is sent secondsLeft 21, rounded up', T, async () => {
+  const { r } = await drafted({ say: false })
+  await r.advance(99_500)
+  const late = await r.connect()
+  assert.deepEqual(timeLeft(late.of('proposal')[0]), { seconds: 120, secondsLeft: 21 })
+})
+
+test('a proposal that closed holds neither seconds nor secondsLeft, whichever status closed it', T, async () => {
+  const cancelled = await drafted({ say: false })
+  await cancelled.r.post('/cancel', { id: cancelled.id })
+  const expired = await drafted({ say: false })
+  await expired.r.advance(120_000)
+  const started = await drafted({ say: false })
+  await confirm(started.r, started.id)
+  started.r.starts()[0].exit({ code: 0 })
+  await settle()
+  const failed = await drafted({ say: false })
+  await confirm(failed.r, failed.id)
+  failed.r.starts()[0].exit({ code: 1, stderr: 'boom\n' })
+  await settle()
+  const replaced = await drafted({ say: false })
+  await replaced.r.turn('and another')
+  await draft(replaced.r, { repo: 'dial', prompt: 'run the tests', reply: null, id: 'toolu_p2' })
+  for (const [name, { page }, last] of [
+    ['cancelled', cancelled, 'cancelled'],
+    ['expired', expired, 'expired'],
+    ['started', started, 'started'],
+    ['failed', failed, 'failed'],
+    ['replaced', replaced, 'replaced']
+  ]) {
+    const closed = page.of('proposal').find(p => p.status === last)
+    assert.ok(closed, `${name}: ${statuses(page)}`)
+    assert.equal(hasTime(closed), false, `${name} holds neither number`)
+    for (const p of page.of('proposal')) assert.equal(hasTime(p), p.status === 'pending' || p.status === 'read', `${name}: ${p.status}`)
+  }
+})
+
+test('a late page after the proposal closed is sent no time and no proposal', T, async () => {
+  const { r } = await drafted({ say: false })
+  await r.advance(120_000)
+  const late = await r.connect()
+  assert.deepEqual(late.of('proposal'), [])
 })
 
 // ---------------------------------------------------------------------------

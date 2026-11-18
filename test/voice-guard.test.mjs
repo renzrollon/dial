@@ -28,11 +28,16 @@ const refusal = (request, status, reason) => {
 // voice: "Every request is checked before it is served", design §13 route names.
 // Re-pinned for add-voice-orchestrator, voice-sessions: "The page can read a session's screen as text" (eight paths became thirteen:
 // GET /log with the token in `t`, and POST /confirm, /cancel, /stop and /attach checked as /turn is).
-test('each of the thirteen paths gives its route', () => {
+// Re-pinned for add-voice-stage-and-capture, voice: "The page is served from the package under a strict policy" (thirteen paths
+// became sixteen: GET /gears.mjs, /scene.mjs and /stage.mjs, checked as the other static files are).
+test('each of the sixteen paths gives its route', () => {
   const routes = [
     ['GET', '/', 'page'],
     ['GET', '/page.js', 'script'],
     ['GET', '/page-logic.mjs', 'logic'],
+    ['GET', '/gears.mjs', 'gears'],
+    ['GET', '/scene.mjs', 'scene'],
+    ['GET', '/stage.mjs', 'stage'],
     ['GET', '/page.css', 'style'],
     ['GET', `/events?t=${TOKEN}`, 'events'],
     ['POST', '/turn', 'turn'],
@@ -44,7 +49,7 @@ test('each of the thirteen paths gives its route', () => {
     ['POST', '/stop', 'stop'],
     ['POST', '/attach', 'attach']
   ]
-  assert.equal(routes.length, 13)
+  assert.equal(routes.length, 16)
   for (const [method, url, route] of routes) {
     assert.deepEqual(checkRequest(req({ method, url }), CTX), { ok: true, route }, `${method} ${url}`)
   }
@@ -209,5 +214,33 @@ test('GET /confirm, /cancel, /stop and /attach and POST /log are 405 with a reas
     const out = refusal(req({ method, url: `/log?t=${TOKEN}&id=c7b0ada6` }), 405)
     assert.equal(typeof out.reason, 'string', `${method} /log`)
     assert.ok(out.reason.length > 0, `${method} /log`)
+  }
+})
+
+// voice: "The scripts of the stage" (the guard side): the three scripts are checked as the other static files are.
+const STAGE_SCRIPTS = [['/gears.mjs', 'gears'], ['/scene.mjs', 'scene'], ['/stage.mjs', 'stage']]
+
+test('GET /gears.mjs, /scene.mjs and /stage.mjs give their routes with the right Host and no token, and ignore a query string', () => {
+  for (const [url, route] of STAGE_SCRIPTS) {
+    assert.deepEqual(checkRequest(req({ method: 'GET', url }), CTX), { ok: true, route }, url)
+    assert.deepEqual(checkRequest(req({ method: 'GET', url: `${url}?t=wrong&x=1` }), CTX), { ok: true, route }, `${url} with a query`)
+  }
+})
+
+test('GET /gears.mjs, /scene.mjs and /stage.mjs with another Host are 403 wrong host', () => {
+  for (const [url] of STAGE_SCRIPTS) {
+    for (const host of [undefined, `localhost:${PORT}`, '127.0.0.1', `127.0.0.1:${PORT + 1}`, `evil.example:${PORT}`]) {
+      refusal(req({ method: 'GET', url, headers: { host } }), 403, 'wrong host')
+    }
+  }
+})
+
+test('POST, PUT and DELETE to /gears.mjs, /scene.mjs and /stage.mjs are 405 with a reason', () => {
+  for (const [url] of STAGE_SCRIPTS) {
+    for (const method of ['POST', 'PUT', 'DELETE']) {
+      const out = refusal(req({ method, url }), 405)
+      assert.equal(typeof out.reason, 'string', `${method} ${url}`)
+      assert.ok(out.reason.length > 0, `${method} ${url}`)
+    }
   }
 })

@@ -1,22 +1,21 @@
+/* Every colour and font of the page and of the mechanism is a custom property here; no script holds one. The values
+   are the reference palette of the design prompt until the owner's visual pick is made: editing this block is the
+   whole change. */
 :root {
-  color-scheme: light dark;
-  --bg: #fafafa;
-  --fg: #1c1c1e;
-  --muted: #5c5c63;
-  --line: #d4d4d8;
-  --accent: #1d4ed8;
-  --danger: #b42318;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #18181b;
-    --fg: #f4f4f5;
-    --muted: #a1a1aa;
-    --line: #3f3f46;
-    --accent: #7aa2ff;
-    --danger: #ff8a80;
-  }
+  color-scheme: dark;
+  --ground: #141416;
+  --text: #ede9e3;
+  --text-muted: #a9a49b;
+  --line: #3a3a40;
+  --control: #c9a961;
+  --danger: #ff8a80;
+  --stage-live: #c9a961;
+  --stage-rest: #6b665c;
+  --stage-accent: #8b2635;
+  --stage-ok: #7fa37c;
+  --stage-fail: #d96b5a;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 
 * {
@@ -27,11 +26,39 @@
   display: none !important;
 }
 
+html,
+body {
+  height: 100%;
+}
+
 body {
   margin: 0;
-  background: var(--bg);
-  color: var(--fg);
-  font: 16px/1.5 system-ui, sans-serif;
+  overflow: hidden;
+  background: var(--ground);
+  color: var(--text);
+  font: 16px/1.5 var(--font-ui);
+}
+
+/* The mechanism takes the window; the words sit in a column beside it, below it on a narrow window. */
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(20rem, 28rem);
+  height: 100vh;
+}
+
+.stage-wrap {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+}
+
+#stage {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  cursor: pointer;
 }
 
 main {
@@ -39,10 +66,23 @@ main {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
-  max-width: 42rem;
+  min-width: 0;
   height: 100vh;
-  margin: 0 auto;
   padding: 1rem;
+  border-left: 1px solid var(--line);
+}
+
+@media (max-width: 48rem) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(10rem, 40vh) minmax(0, 1fr);
+  }
+
+  main {
+    height: auto;
+    border-top: 1px solid var(--line);
+    border-left: none;
+  }
 }
 
 h1 {
@@ -55,7 +95,7 @@ p {
 }
 
 .purpose {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .controls {
@@ -75,9 +115,9 @@ button {
 }
 
 button[aria-pressed='true'] {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--bg);
+  border-color: var(--control);
+  background: var(--control);
+  color: var(--ground);
 }
 
 button:disabled,
@@ -87,7 +127,7 @@ input:disabled {
 }
 
 :focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--control);
   outline-offset: 2px;
 }
 
@@ -109,7 +149,7 @@ input:disabled {
 
 #notice,
 #interim {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 #interim {
@@ -126,7 +166,7 @@ input:disabled {
 }
 
 #empty {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .line {
@@ -140,12 +180,12 @@ input:disabled {
 }
 
 .line-user .label {
-  color: var(--accent);
+  color: var(--control);
 }
 
 .line-tool {
-  color: var(--muted);
-  font-family: ui-monospace, monospace;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
   font-size: 0.9rem;
 }
 
@@ -186,11 +226,11 @@ h2 {
 }
 
 #proposal {
-  border-color: var(--accent);
+  border-color: var(--control);
 }
 
 #proposal-prompt {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9rem;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -212,7 +252,7 @@ h2 {
 }
 
 #sessions-empty {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .session {
@@ -221,14 +261,14 @@ h2 {
 }
 
 .session-prompt {
-  font-family: ui-monospace, monospace;
+  font-family: var(--font-mono);
   font-size: 0.9rem;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .session-command {
-  color: var(--muted);
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -250,7 +290,7 @@ h2 {
   max-height: 16rem;
   margin: 0;
   overflow: auto;
-  font: 0.85rem/1.4 ui-monospace, monospace;
+  font: 0.85rem/1.4 var(--font-mono);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
