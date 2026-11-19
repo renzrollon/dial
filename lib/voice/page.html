@@ -7,6 +7,10 @@
 <link rel="stylesheet" href="/page.css">
 </head>
 <body>
+<div class="shell">
+<div class="stage-wrap">
+  <canvas id="stage" aria-hidden="true"></canvas>
+</div>
 <main>
   <h1>Dial voice</h1>
   <p class="purpose">Ask Dial aloud while you work: it checks your repos and answers in a sentence.</p>
@@ -16,12 +20,40 @@
     <button type="button" id="mute" aria-pressed="false">Mute</button>
     <button type="button" id="stop">Stop</button>
     <button type="button" id="quit">Quit</button>
+    <button type="button" id="fullscreen">Full screen</button>
   </div>
 
   <p id="status" role="status" tabindex="-1">Not started</p>
   <p id="error" role="alert"></p>
   <p id="notice" aria-live="polite"></p>
   <p id="interim"></p>
+
+  <section id="proposal" aria-labelledby="proposal-heading" hidden>
+    <h2 id="proposal-heading">Proposed session</h2>
+    <p>Repo: <strong id="proposal-repo"></strong></p>
+    <p id="proposal-prompt"></p>
+    <p id="proposal-status" aria-live="polite"></p>
+    <p id="proposal-reason"></p>
+    <div class="controls">
+      <button type="button" id="confirm">Confirm</button>
+      <button type="button" id="cancel">Cancel</button>
+    </div>
+  </section>
+
+  <section id="sessions-panel" aria-labelledby="sessions-heading">
+    <h2 id="sessions-heading">Sessions</h2>
+    <p id="sessions-empty">No sessions started by Dial are running.</p>
+    <ul id="sessions"></ul>
+  </section>
+
+  <section id="log-panel" aria-labelledby="log-title" hidden>
+    <div class="log-head">
+      <h2 id="log-title"></h2>
+      <button type="button" id="log-close">Close log</button>
+    </div>
+    <p id="log-reason"></p>
+    <pre id="log-lines" tabindex="0"></pre>
+  </section>
 
   <div id="transcript" role="log" aria-label="Transcript">
     <p id="empty">Ask what needs you, or whether a pull request can merge. Try: &quot;what needs me?&quot;</p>
@@ -32,6 +64,7 @@
     <input type="text" id="turn" name="turn">
   </form>
 </main>
+</div>
 <script type="module" src="/page.js"></script>
 </body>
 </html>

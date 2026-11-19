@@ -1,8 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { checkRecognition, createController } from '../lib/voice/page-logic.mjs'
+import { existsSync, readFileSync } from 'node:fs'
+import * as logic from '../lib/voice/page-logic.mjs'
 import { fakeTimers } from './helpers.mjs'
+
+// A namespace import: countWords and statusText are new, and a missing named export would stop this whole file from
+// loading instead of failing the cases that use them.
+const { checkRecognition, createController } = logic
+const countWords = text => logic.countWords(text)
+const statusText = state => logic.statusText(state)
 
 // The page (voice delta, design §9 and §13). The controller is exercised with a
 // fake recognizer class, a fake `connect`, `fakeTimers`, and a recording `view`
@@ -45,6 +51,8 @@ function fakeRecognition({ availability = 'available', install = true, noAvailab
       this.onresult = null
       this.onend = null
       this.onerror = null
+      this.onspeechstart = null
+      this.onspeechend = null
       R.instances.push(this)
     }
     set processLocally(value) {
@@ -72,6 +80,12 @@ function fakeRecognition({ availability = 'available', install = true, noAvailab
     }
     fail(code) {
       this.onerror?.({ error: code, message: '' })
+    }
+    speechstart() {
+      this.onspeechstart?.({})
+    }
+    speechend() {
+      this.onspeechend?.({})
     }
     end() {
       this.running = false
@@ -138,11 +152,27 @@ function fakePost() {
   return post
 }
 
+/**
+ * `get` that answers at once from `reply(path)` (default: a log of two lines) and records every path on `get.calls`.
+ * Contract from design §11: get(path) -> Promise<{ status, body }>; the page adds the token itself.
+ */
+function fakeGet(reply = path => ({ status: 200, body: { ok: true, id: new URL(path, 'http://x').searchParams.get('id'), lines: ['● Running tests', '  12 passed'] } })) {
+  const get = async path => {
+    get.calls.push(path)
+    return reply(path)
+  }
+  get.calls = []
+  return get
+}
+
 /** A recording `view`; `log` holds every call in order. */
 function fakeView() {
-  const log = { statuses: [], errors: [], lines: [], notices: [], interims: [], inputsCleared: 0, focused: 0, closed: 0 }
+  const log = { statuses: [], errors: [], lines: [], notices: [], interims: [], proposals: [], sessionLists: [], logs: [], stages: [], muted: [], inputsCleared: 0, focused: 0, closed: 0 }
   const view = {
     status: text => log.statuses.push(text),
+    // add-voice-stage-and-capture: the view also takes the stage's facts and the mute mark.
+    stage: change => log.stages.push(change),
+    muted: on => log.muted.push(on),
     error: text => log.errors.push(text),
     line: (kind, text) => log.lines.push([kind, text]),
     notice: text => log.notices.push(text),
@@ -153,11 +183,32 @@ function fakeView() {
     focusStatus: () => {
       log.focused += 1
     },
+    proposal: (proposal, reason) => log.proposals.push([proposal, reason]),
+    sessions: sessions => log.sessionLists.push(sessions),
+    log: (id, lines, reason) => log.logs.push([id, lines, reason]),
     closed: () => {
       log.closed += 1
     },
   }
   return { view, log }
+}
+
+/**
+ * A recording `screen` (design §14): `enter`, `leave` and `active`. The browser changes its answer on its own time, so
+ * `on` is moved by the test, not by `enter` and `leave`. `enter: 'reject'` is a browser that refuses the request.
+ */
+function fakeScreen({ active = false, enter = 'ok' } = {}) {
+  const screen = { entered: 0, left: 0, on: active }
+  screen.enter = () => {
+    screen.entered += 1
+    return enter === 'reject' ? Promise.reject(new Error('refused')) : Promise.resolve()
+  }
+  screen.leave = () => {
+    screen.left += 1
+    return Promise.resolve()
+  }
+  screen.active = () => screen.on
+  return screen
 }
 
 const shown = log => log.statuses.at(-1)
@@ -167,19 +218,21 @@ const sequence = list => list.filter((text, i) => i === 0 || text !== list[i - 1
  * A controller, its stream open, `hello` and the first `state` delivered.
  * `recognition: false` is a browser with no SpeechRecognition.
  */
-async function sitting({ recognition = {}, lang = 'en-US', state = 'idle' } = {}) {
+async function sitting({ recognition = {}, lang = 'en-US', state = 'idle', getReply, screen } = {}) {
   const R = fakeRecognition(recognition || {})
   const connect = fakeConnect()
   const post = fakePost()
+  const get = fakeGet(getReply)
   const { timers, advance } = fakeTimers()
   const { view, log } = fakeView()
-  const c = createController({ Recognition: recognition === false ? undefined : R.Recognition, post, connect, timers, view })
+  const c = createController({ Recognition: recognition === false ? undefined : R.Recognition, post, get, connect, timers, view, screen })
   c.open()
   const s = {
     c,
     R,
     connect,
     post,
+    get,
     advance,
     log,
     emit: async (name, data = {}) => {
@@ -425,7 +478,9 @@ test('no-speech and aborted are ends with no notice, and recognition starts agai
 
 // ---------------------------------------------------------------- listening only while idle
 
-// voice: "The page listens only while Dial is idle"
+// voice (modified): "The page listens only while Dial is idle" - every final transcript is a turn, except `confirm` and
+// `cancel` while the open proposal has the status `read` (re-pinned from "every final transcript is a turn"; the
+// exception has its own cases in the proposal section below).
 test('a final transcript is stopped on and posted as a turn with the interim text cleared', async () => {
   const s = await listening()
   await s.hear('what needs me', true)
@@ -922,13 +977,566 @@ test('a stream that ends after bye is not reopened', async () => {
   assert.equal(shown(s.log), 'Closed')
 })
 
+// ---------------------------------------------------------------- confirm and cancel by voice
+
+const PROPOSAL = { id: 'ab12cd34', repo: 'katipon', prompt: '/interlock:ship add-parser', status: 'pending' }
+const SESSION = { id: 'c7b0ada6', repo: 'katipon', cwd: '/repos/katipon', state: 'blocked', waitingFor: 'permission prompt', startedAt: '2026-11-17T07:21:39.451Z', prompt: '/interlock:ship add-parser', sessionId: 'c7b0ada6-b039-4dca-8847-cfb263166f6b' }
+const calls = s => s.post.calls.map(call => [call.path, call.body])
+const reasonOf = ([proposal, reason]) => reason ?? proposal?.reason
+
+// voice: "Confirm after the reading"
+test('the word confirm while the proposal is read is posted to /confirm as spoken, and not as a turn', async () => {
+  for (const said of ['Confirm.', 'confirm', ' CONFIRM! ', 'Confirm?']) {
+    const s = await listening()
+    await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+    await s.hear(said, true)
+    assert.deepEqual(calls(s), [['/confirm', { id: 'ab12cd34', spoken: true }]], said)
+  }
+})
+
+// voice: "Cancel after the reading"
+test('the word cancel while the proposal is read is posted to /cancel, and not as a turn', async () => {
+  for (const said of ['cancel', 'Cancel.']) {
+    const s = await listening()
+    await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+    await s.hear(said, true)
+    assert.deepEqual(calls(s), [['/cancel', { id: 'ab12cd34' }]], said)
+  }
+})
+
+// voice: "Confirm before the reading is a turn"
+test('confirm while the proposal is pending, or with no proposal open, is an ordinary turn', async () => {
+  const pending = await listening()
+  await pending.emit('proposal', { ...PROPOSAL, status: 'pending' })
+  await pending.hear('confirm', true)
+  assert.deepEqual(calls(pending), [['/turn', { text: 'confirm' }]])
+  const none = await listening()
+  await none.hear('confirm', true)
+  assert.deepEqual(calls(none), [['/turn', { text: 'confirm' }]])
+  const closed = await listening()
+  await closed.emit('proposal', { ...PROPOSAL, status: 'read' })
+  await closed.emit('proposal', { ...PROPOSAL, status: 'cancelled' })
+  await closed.hear('confirm', true)
+  assert.deepEqual(calls(closed), [['/turn', { text: 'confirm' }]], 'a closed proposal no longer takes the word')
+})
+
+// voice: "Confirm inside a sentence is a turn"
+test('confirm inside a sentence, and yes, are turns even while the proposal is read', async () => {
+  for (const said of ['can you confirm that', 'yes', 'confirm it']) {
+    const s = await listening()
+    await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+    await s.hear(said, true)
+    assert.deepEqual(calls(s), [['/turn', { text: said }]], said)
+  }
+})
+
+// voice: "A typed word is a turn"
+test('a typed confirm is a turn even while the proposal is read', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, status: 'read' })
+  const done = s.c.submit('confirm')
+  await flush()
+  assert.deepEqual(calls(s), [['/turn', { text: 'confirm' }]])
+  s.post.answer(202)
+  await done
+})
+
+// ---------------------------------------------------------------- the proposal card
+// voice-sessions: "The page shows an open proposal with Confirm and Cancel".
+
+test('a proposal event reaches the view with its repo, prompt and status; a closed one takes the card away', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  assert.deepEqual(s.log.proposals.at(-1)[0], PROPOSAL)
+  for (const status of ['started', 'cancelled', 'expired', 'replaced']) {
+    await s.emit('proposal', PROPOSAL)
+    await s.emit('proposal', { ...PROPOSAL, status })
+    assert.equal(s.log.proposals.at(-1)[0], null, `${status} removes the card`)
+  }
+})
+
+test('Confirm by a click posts the id and spoken false', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  const done = s.c.confirm()
+  await flush()
+  assert.deepEqual(calls(s), [['/confirm', { id: 'ab12cd34', spoken: false }]])
+  s.post.answer(202, { ok: true })
+  await done
+})
+
+test('Cancel by a click posts the id to /cancel', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  const done = s.c.cancel()
+  await flush()
+  assert.deepEqual(calls(s), [['/cancel', { id: 'ab12cd34' }]])
+  s.post.answer(200, { ok: true })
+  await done
+})
+
+test('a refused confirmation shows its reason and keeps the card', async () => {
+  const s = await sitting()
+  await s.emit('proposal', PROPOSAL)
+  const done = s.c.confirm()
+  await flush()
+  s.post.answer(409, { ok: false, reason: 'a session is already running in katipon' })
+  await done
+  await flush()
+  const shownReasons = [...s.log.errors, ...s.log.proposals.map(reasonOf)]
+  assert.ok(shownReasons.includes('a session is already running in katipon'), 'the reason is shown')
+  assert.equal(s.log.proposals.at(-1)[0]?.id, 'ab12cd34', 'the card is kept')
+})
+
+test('a failed start shows its reason and the card carries the failed status, so no Confirm is offered', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, status: 'failed', reason: 'claude --bg failed (exit 1): Workspace not trusted.' })
+  const last = s.log.proposals.at(-1)
+  assert.equal(last[0].status, 'failed')
+  assert.equal(reasonOf(last), 'claude --bg failed (exit 1): Workspace not trusted.')
+})
+
+test('a prompt that looks like markup reaches the view as the same string', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, prompt: '<img src=x onerror=alert(1)>' })
+  assert.equal(s.log.proposals.at(-1)[0].prompt, '<img src=x onerror=alert(1)>')
+})
+
+test('a notice event reaches the view as text', async () => {
+  const s = await sitting()
+  await s.emit('notice', { text: 'The session in katipon needs you: permission prompt.' })
+  const texts = [...s.log.notices, ...s.log.lines.map(l => l[1])]
+  assert.ok(texts.includes('The session in katipon needs you: permission prompt.'))
+})
+
+// ---------------------------------------------------------------- the session list and its controls
+// voice-sessions: "The page lists the sessions with their controls".
+
+test('a sessions event reaches the view with the whole list', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  assert.deepEqual(s.log.sessionLists.at(-1), [SESSION])
+  await s.emit('sessions', { sessions: [], pollSeconds: 5 })
+  assert.deepEqual(s.log.sessionLists.at(-1), [])
+})
+
+test('Stop and Terminal post the id, and a refusal shows its reason', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  const stopped = s.c.stopSession('c7b0ada6')
+  await flush()
+  assert.deepEqual(calls(s), [['/stop', { id: 'c7b0ada6' }]])
+  s.post.answer(502, { ok: false, reason: 'claude stop failed (exit 1): already stopped' })
+  await stopped
+  assert.ok(s.log.errors.includes('claude stop failed (exit 1): already stopped'))
+  const attached = s.c.attach('c7b0ada6')
+  await flush()
+  assert.deepEqual(calls(s).at(-1), ['/attach', { id: 'c7b0ada6' }])
+  s.post.answer(409, { ok: false, reason: 'run this in a terminal: claude attach c7b0ada6' })
+  await attached
+  assert.ok(s.log.errors.includes('run this in a terminal: claude attach c7b0ada6'))
+})
+
+test('the log is asked for at once and every pollSeconds, and its lines reach the view', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  assert.equal(s.get.calls.length, 1)
+  assert.match(s.get.calls[0], /^\/log\?id=c7b0ada6$/)
+  assert.deepEqual(s.log.logs.at(-1).slice(0, 2), ['c7b0ada6', ['● Running tests', '  12 passed']])
+  s.advance(4999)
+  await flush()
+  assert.equal(s.get.calls.length, 1)
+  s.advance(1)
+  await flush()
+  assert.equal(s.get.calls.length, 2)
+  s.advance(5000)
+  await flush()
+  assert.equal(s.get.calls.length, 3)
+})
+
+test('the log is no longer asked for after closeLog', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  s.c.closeLog()
+  s.advance(60_000)
+  await flush()
+  assert.equal(s.get.calls.length, 1)
+})
+
+test('the log is no longer asked for after a sessions event without that session, and goes on while it is listed', async () => {
+  const s = await sitting()
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  await s.emit('sessions', { sessions: [{ ...SESSION, state: 'working', waitingFor: null }], pollSeconds: 5 })
+  s.advance(5000)
+  await flush()
+  assert.equal(s.get.calls.length, 2, 'still listed: still asked')
+  await s.emit('sessions', { sessions: [], pollSeconds: 5 })
+  s.advance(60_000)
+  await flush()
+  assert.equal(s.get.calls.length, 2, 'no longer listed: not asked')
+})
+
+// voice-sessions: "A log line that looks like markup"
+test('a log line that looks like markup reaches the view unchanged', async () => {
+  const s = await sitting({ getReply: () => ({ status: 200, body: { ok: true, id: 'c7b0ada6', lines: ['<script>alert(1)</script>'] } }) })
+  await s.emit('sessions', { sessions: [SESSION], pollSeconds: 5 })
+  s.c.openLog('c7b0ada6')
+  await flush()
+  assert.deepEqual(s.log.logs.at(-1)[1], ['<script>alert(1)</script>'])
+})
+
+// ---------------------------------------------------------------- the stage, the status words, mute and full screen
+// voice-stage (add-voice-stage-and-capture). The controller tells the stage one small fact per `view.stage` call:
+// { state } | { listening } | { heard } | { words } | { sentence: true } | { turn: true } | { sessions: string[] }
+// | { proposal: { seconds, secondsLeft } | null } | { closed: true } (design §14 Interfaces).
+
+const facts = (s, key) => s.log.stages.filter(change => key in change)
+const lastFact = (s, key) => facts(s, key).at(-1)?.[key]
+const told = s => JSON.stringify(s.log.stages)
+const interrupts = s => s.post.calls.filter(call => call.path === '/interrupt')
+
+// voice-stage: "The stage is told what happens and nothing that was said"
+test('every call of view.stage holds one fact', async () => {
+  const s = await listening()
+  await s.hear('what needs me', false)
+  await s.emit('state', { state: 'thinking' })
+  await s.emit('sentence', { text: 'Two things.' })
+  await s.emit('sessions', { sessions: [SESSION] })
+  await s.emit('bye', {})
+  assert.ok(s.log.stages.length >= 5, 'the stage was told several things')
+  for (const change of s.log.stages) assert.equal(Object.keys(change).length, 1, JSON.stringify(change))
+})
+
+// voice-stage: "A sentence"
+test('a sentence event tells the stage that a sentence arrived and nothing it is told holds the text', async () => {
+  const s = await sitting()
+  await s.emit('sentence', { text: 'Number 41 can merge.' })
+  assert.deepEqual(facts(s, 'sentence'), [{ sentence: true }])
+  assert.doesNotMatch(told(s), /Number|merge|41/)
+})
+
+// voice-stage: "The transcript being heard"
+test('the transcript being heard tells the stage its number of words and not the words', async () => {
+  const s = await listening()
+  await s.hear('what needs me today', false)
+  assert.equal(lastFact(s, 'words'), 4)
+  assert.doesNotMatch(told(s), /what|needs|today/)
+  await s.hear('what needs me today and tomorrow', false)
+  assert.equal(lastFact(s, 'words'), 6)
+})
+
+// voice-stage: "The stage is told what happens and nothing that was said" - whether speech is being heard
+test('the recognizer is given onspeechstart and onspeechend, and the stage is told whether speech is heard', async () => {
+  const s = await listening()
+  const rec = s.R.live()
+  assert.equal(typeof rec.onspeechstart, 'function')
+  assert.equal(typeof rec.onspeechend, 'function')
+  rec.speechstart()
+  assert.equal(lastFact(s, 'heard'), true)
+  rec.speechend()
+  assert.equal(lastFact(s, 'heard'), false)
+})
+
+// voice-stage: "The stage is told what happens and nothing that was said" - the state name and whether recognition runs
+test('the stage is told the name of each state', async () => {
+  const s = await sitting()
+  for (const state of ['thinking', 'speaking', 'idle']) await s.emit('state', { state })
+  assert.deepEqual(
+    facts(s, 'state').map(change => change.state).filter((name, i, all) => i === 0 || name !== all[i - 1]).slice(-3),
+    ['thinking', 'speaking', 'idle'],
+  )
+})
+
+// voice-stage: "The balance beats while Dial can hear the owner" read through what the page tells the stage
+test('the stage is told whether recognition is running: it starts, stops for thinking and for mute, and starts again', async () => {
+  const s = await sitting()
+  assert.equal(lastFact(s, 'listening') ?? false, false, 'nothing runs before Start')
+  await s.c.start()
+  await flush()
+  assert.equal(lastFact(s, 'listening'), true)
+  await s.emit('state', { state: 'thinking' })
+  assert.equal(lastFact(s, 'listening'), false, 'Dial does not hear itself')
+  await s.emit('state', { state: 'idle' })
+  assert.equal(lastFact(s, 'listening'), true)
+  s.c.mute(true)
+  await flush()
+  assert.equal(lastFact(s, 'listening'), false)
+  s.c.mute(false)
+  await flush()
+  assert.equal(lastFact(s, 'listening'), true)
+})
+
+// voice-stage: "Typed turns only"
+test('where on-device recognition is not offered the stage is never told that recognition runs', async () => {
+  const s = await sitting({ recognition: { availability: 'unavailable' } })
+  await s.c.start()
+  await flush()
+  await s.emit('state', { state: 'thinking' })
+  await s.emit('state', { state: 'idle' })
+  assert.equal(facts(s, 'listening').some(change => change.listening === true), false)
+})
+
+// voice-stage: "A restart after silence is not news"
+test('recognition that ends with no result and starts again at once does not tell the stage it stopped', async () => {
+  const s = await listening()
+  const before = s.log.stages.length
+  s.R.live().end()
+  s.advance(50)
+  await flush()
+  assert.ok(s.R.live(), 'recognition started again')
+  assert.equal(s.log.stages.slice(before).some(change => change.listening === false), false)
+})
+
+// voice-stage: "A refusal"
+test('a refused state tells the stage the state and not the reason', async () => {
+  const s = await sitting()
+  await s.emit('state', { state: 'refused', reason: 'it has tools other than Bash: Read' })
+  assert.equal(lastFact(s, 'state'), 'refused')
+  assert.doesNotMatch(told(s), /tools|Bash|Read/)
+})
+
+// voice-stage: "Sessions"
+test('a sessions event tells the stage the states in list order and neither the repo, the prompt nor an id', async () => {
+  const s = await sitting()
+  await s.emit('sessions', {
+    sessions: [
+      { ...SESSION, id: 'aaaa1111', state: 'working', repo: 'katipon', prompt: '/interlock:ship add-parser' },
+      { ...SESSION, id: 'bbbb2222', state: 'blocked', repo: 'other', prompt: 'second prompt' },
+    ],
+  })
+  assert.deepEqual(lastFact(s, 'sessions'), ['working', 'blocked'])
+  assert.doesNotMatch(told(s), /katipon|other|add-parser|prompt|aaaa1111|bbbb2222|\/repos/)
+})
+
+// voice-stage: "The next turn" - a `user` event begins a turn
+test('a user event tells the stage that a turn began and nothing it is told holds the text', async () => {
+  const s = await sitting()
+  await s.emit('user', { text: 'what needs me today' })
+  assert.deepEqual(facts(s, 'turn'), [{ turn: true }])
+  assert.doesNotMatch(told(s), /needs|today/)
+})
+
+// voice-stage: "The stage is told what happens and nothing that was said" - the seconds of an open proposal;
+// "The reserve drains while a proposal waits" reads them
+test('an open proposal tells the stage its seconds and secondsLeft and nothing else of it; a closed one tells it null', async () => {
+  const s = await sitting()
+  await s.emit('proposal', { ...PROPOSAL, seconds: 120, secondsLeft: 120 })
+  assert.deepEqual(lastFact(s, 'proposal'), { seconds: 120, secondsLeft: 120 })
+  await s.emit('proposal', { ...PROPOSAL, status: 'read', seconds: 120, secondsLeft: 85 })
+  assert.deepEqual(lastFact(s, 'proposal'), { seconds: 120, secondsLeft: 85 })
+  assert.doesNotMatch(told(s), /katipon|add-parser|ab12cd34/)
+  for (const status of ['started', 'failed', 'cancelled', 'expired', 'replaced']) {
+    await s.emit('proposal', { ...PROPOSAL, seconds: 120, secondsLeft: 100 })
+    assert.deepEqual(lastFact(s, 'proposal'), { seconds: 120, secondsLeft: 100 }, status)
+    await s.emit('proposal', { ...PROPOSAL, status, reason: 'x' })
+    assert.equal(lastFact(s, 'proposal'), null, status)
+  }
+})
+
+// voice-stage: "Parked" / "The stage is told what happens and nothing that was said" - that Dial has closed
+test('bye tells the stage that Dial has closed', async () => {
+  const s = await listening()
+  assert.deepEqual(facts(s, 'closed'), [])
+  await s.emit('bye', {})
+  assert.deepEqual(facts(s, 'closed'), [{ closed: true }])
+})
+
+// ---------------------------------------------------------------- countWords and statusText
+
+// voice-stage: "The barrel winds as the owner speaks" counts words; the controller counts them with countWords
+test('countWords counts whitespace-separated words and is 0 for a blank text', () => {
+  assert.equal(countWords(''), 0)
+  assert.equal(countWords('   '), 0)
+  assert.equal(countWords('\t\n \r\n'), 0)
+  assert.equal(countWords('what'), 1)
+  assert.equal(countWords('  what  '), 1)
+  assert.equal(countWords('what needs me today'), 4)
+  assert.equal(countWords('what\tneeds\nme\r\ntoday  and   tomorrow'), 6)
+})
+
+// voice-stage: "The mechanism holds no text and the page says the state in words" - the words for each state
+test('statusText gives the eight status lines', () => {
+  const base = { started: true, offered: true, muted: false, listening: true, state: 'idle', reason: '', closed: false }
+  const text = changes => statusText({ ...base, ...changes })
+  assert.equal(text({ started: false, listening: false }), 'Not started')
+  assert.equal(text({}), 'Listening')
+  assert.equal(text({ muted: true, listening: false }), 'Muted')
+  assert.equal(text({ offered: false, listening: false }), 'Typed turns only')
+  assert.equal(text({ state: 'thinking', listening: false }), 'Thinking')
+  assert.equal(text({ state: 'speaking', listening: false }), 'Speaking')
+  assert.equal(text({ state: 'refused', reason: 'it has tools other than Bash: Read', listening: false }), 'Refused: it has tools other than Bash: Read')
+  assert.equal(text({ closed: true, listening: false }), 'Closed')
+})
+
+// voice-stage: "The words for each state" - Closed beats every other state
+test('statusText says Closed whatever else holds', () => {
+  assert.equal(statusText({ started: true, offered: true, muted: true, listening: false, state: 'refused', reason: 'x', closed: true }), 'Closed')
+})
+
+// voice-stage: "The words for each state" through view.status
+test('the status line says Not started, Listening, Muted, Thinking, Speaking, Refused with its reason and Closed, in that order', async () => {
+  const s = await sitting()
+  await s.c.start()
+  await flush()
+  s.c.mute(true)
+  await flush()
+  await s.emit('state', { state: 'thinking' })
+  await s.emit('state', { state: 'speaking' })
+  await s.emit('state', { state: 'refused', reason: 'it has tools other than Bash: Read' })
+  await s.emit('bye', {})
+  assert.deepEqual(sequence(s.log.statuses), [
+    'Not started',
+    'Listening',
+    'Muted',
+    'Thinking',
+    'Speaking',
+    'Refused: it has tools other than Bash: Read',
+    'Closed',
+  ])
+})
+
+// voice-stage: "Recognition is not offered"
+test('the status line says Typed turns only where on-device recognition is not offered and the state is idle', async () => {
+  const s = await sitting({ recognition: { availability: 'unavailable' } })
+  await s.c.start()
+  await flush()
+  assert.equal(shown(s.log), 'Typed turns only')
+})
+
+// voice-stage: "Mute is marked"
+test('the view is told Mute is on and then off', async () => {
+  const s = await sitting()
+  await s.c.start()
+  await flush()
+  s.c.mute(true)
+  assert.equal(s.log.muted.at(-1), true)
+  s.c.mute(false)
+  assert.equal(s.log.muted.at(-1), false)
+})
+
+// ---------------------------------------------------------------- full screen
+
+// voice-stage: "The starting click"
+test('Start asks for full screen once, before it awaits anything, and listens', async () => {
+  const screen = fakeScreen()
+  const s = await sitting({ screen })
+  assert.equal(screen.entered, 0, 'nothing asks before the click')
+  const started = s.c.start()
+  assert.equal(screen.entered, 1, 'asked in the same turn of the event loop as the click')
+  await started
+  await flush()
+  assert.equal(screen.entered, 1)
+  assert.ok(s.R.live(), 'recognition runs')
+  assert.equal(shown(s.log), 'Listening')
+})
+
+// voice-stage: "The browser refuses"
+test('a refused request for full screen is ignored: listening starts and the page shows no error', async () => {
+  const screen = fakeScreen({ enter: 'reject' })
+  const s = await sitting({ screen })
+  await s.c.start()
+  await flush()
+  assert.equal(screen.entered, 1)
+  assert.ok(s.R.live(), 'recognition runs')
+  assert.equal(shown(s.log), 'Listening')
+  assert.deepEqual(s.log.errors, [])
+  assert.deepEqual(s.log.notices, [])
+})
+
+// voice-stage: "The window goes full screen on the starting click" - a controller made without a screen
+test('a controller made without a screen starts listening and has nothing to ask', async () => {
+  const s = await sitting()
+  await s.c.start()
+  await flush()
+  assert.ok(s.R.live())
+  assert.equal(shown(s.log), 'Listening')
+  assert.deepEqual(s.log.errors, [])
+  assert.equal(s.post.calls.length, 0)
+})
+
+// voice-stage: "The Full screen control"
+test('the Full screen control leaves full screen the first time and asks for it the second', async () => {
+  const screen = fakeScreen({ active: true })
+  const s = await sitting({ screen })
+  await s.c.fullScreen()
+  assert.equal(screen.left, 1)
+  assert.equal(screen.entered, 0)
+  screen.on = false
+  await s.c.fullScreen()
+  assert.equal(screen.left, 1)
+  assert.equal(screen.entered, 1)
+})
+
+// voice-stage: "Escape reaches the page"
+test('Escape in full screen followed by the document leaving full screen posts /interrupt exactly once', async () => {
+  const screen = fakeScreen({ active: true })
+  const s = await sitting({ screen })
+  s.c.key('Escape')
+  screen.on = false
+  s.c.leftFullScreen()
+  await flush()
+  assert.equal(interrupts(s).length, 1)
+  assert.equal(s.post.calls.length, 1, 'nothing else is posted')
+})
+
+// voice-stage: "Escape does not reach the page"
+test('the document leaving full screen with no key event posts /interrupt once', async () => {
+  const screen = fakeScreen({ active: true })
+  const s = await sitting({ screen })
+  screen.on = false
+  s.c.leftFullScreen()
+  await flush()
+  assert.equal(interrupts(s).length, 1)
+  assert.equal(s.post.calls.length, 1)
+})
+
+// voice-stage: "The page's own control"
+test('leaving full screen with the Full screen control posts nothing, and the next exit it did not ask for posts once', async () => {
+  const screen = fakeScreen({ active: true })
+  const s = await sitting({ screen })
+  await s.c.fullScreen()
+  screen.on = false
+  s.c.leftFullScreen()
+  await flush()
+  assert.equal(s.post.calls.length, 0)
+  await s.c.fullScreen()
+  assert.equal(screen.entered, 1)
+  screen.on = true
+  screen.on = false
+  s.c.leftFullScreen()
+  await flush()
+  assert.equal(interrupts(s).length, 1, 'the control only covers the exit it asked for')
+})
+
+// voice-stage: "A click on the mechanism"
+test('stop posts /interrupt and does not leave full screen', async () => {
+  const screen = fakeScreen({ active: true })
+  const s = await sitting({ screen })
+  await s.emit('state', { state: 'speaking' })
+  const stopped = s.c.stop()
+  await flush()
+  s.post.answer(200, { ok: true })
+  await stopped
+  assert.equal(interrupts(s).length, 1)
+  assert.equal(screen.left, 0)
+  assert.equal(screen.entered, 0)
+})
+
 // ---------------------------------------------------------------- the page files as text
 
-const PAGE_FILES = ['page.html', 'page.js', 'page-logic.mjs', 'page.css']
+// add-voice-stage-and-capture: the page is served five scripts (voice: "The page is served from the package under a strict policy").
+const SCRIPTS = ['page.js', 'page-logic.mjs', 'gears.mjs', 'scene.mjs', 'stage.mjs']
+const PAGE_FILES = ['page.html', 'page.css', ...SCRIPTS]
 const read = name => readFileSync(new URL(`../lib/voice/${name}`, import.meta.url), 'utf8')
 
-// voice: "The page shows every string as text"
-test('page.js and page-logic.mjs hold no markup sink, eval or webkit recognizer', () => {
+// voice (modified): "The page shows every string as text", "The scripts hold no markup sink": now the five scripts.
+test('the five scripts hold no markup sink, eval or webkit recognizer', () => {
   const banned = [
     ['innerHTML', /innerHTML/],
     ['outerHTML', /outerHTML/],
@@ -937,16 +1545,16 @@ test('page.js and page-logic.mjs hold no markup sink, eval or webkit recognizer'
     ['eval(', /\beval\s*\(/],
     ['webkitSpeechRecognition', /webkitSpeechRecognition/],
   ]
-  for (const name of ['page.js', 'page-logic.mjs']) {
+  for (const name of SCRIPTS) {
     const source = read(name)
     for (const [label, pattern] of banned) assert.doesNotMatch(source, pattern, `${name} holds ${label}`)
   }
 })
 
-// voice: "The scripts never ask for a server recognizer"
-test('every processLocally in the scripts is set to true', () => {
+// voice (modified): "The scripts never ask for a server recognizer": now the five scripts.
+test('every processLocally in the five scripts is set to true', () => {
   let seen = 0
-  for (const name of ['page.js', 'page-logic.mjs']) {
+  for (const name of SCRIPTS) {
     const source = read(name)
     for (const found of source.matchAll(/processLocally/g)) {
       seen += 1
@@ -974,7 +1582,8 @@ test('page.js is a module that passes the token header, the stream and the keys 
   assert.match(source, /aria-pressed/, 'the Mute control carries aria-pressed')
 })
 
-test('none of the four page files holds an http:// or https:// address', () => {
+// voice (modified): "Nothing from another origin": the seven files, the five scripts included.
+test('none of the seven page files holds an http:// or https:// address', () => {
   for (const name of PAGE_FILES) assert.doesNotMatch(read(name), /https?:\/\//, name)
 })
 
@@ -1036,4 +1645,154 @@ test('page.html says what Dial voice is for and suggests a first question in the
   assert.ok(html.includes(suggestion), 'the first question')
   assert.ok(html.indexOf(purpose) < html.search(/\bid\s*=\s*["']transcript["']/), 'the purpose sits above the transcript')
   assert.ok(html.indexOf(suggestion) > html.search(/\bid\s*=\s*["']transcript["']/), 'the suggestion sits in the transcript')
+})
+
+// ---------------------------------------------------------------- the page files, with proposals and sessions
+// voice-sessions: "The page shows session strings as text", "The page shows an open proposal with Confirm and Cancel",
+// "The page lists the sessions with their controls". The DOM mapping cannot run here, so its rules are read as text.
+
+test('page.js maps proposal, sessions and log onto the document with textContent and passes get to the controller', () => {
+  const source = read('page.js')
+  assert.match(source, /\bproposal\b/)
+  assert.match(source, /\bsessions\b/)
+  assert.match(source, /\blog\b/)
+  assert.match(source, /textContent/)
+  assert.match(source, /\bget\b/, 'passes get')
+  assert.match(source, /\/log/, 'asks GET /log')
+})
+
+test('the page offers Confirm, Cancel, Log, Stop and Terminal, and shows the claude attach command', () => {
+  const text = read('page.html') + read('page.js')
+  for (const word of ['Confirm', 'Cancel', 'Log', 'Stop', 'Terminal', 'claude attach']) assert.ok(text.includes(word), word)
+})
+
+test('the controller of the four page files names no markup sink for the new events', () => {
+  for (const name of ['page.js', 'page-logic.mjs']) {
+    const source = read(name)
+    for (const pattern of [/innerHTML/, /outerHTML/, /insertAdjacentHTML/, /document\s*\.\s*write/, /\beval\s*\(/, /\bcreateContextualFragment\b/, /\bDOMParser\b/]) {
+      assert.doesNotMatch(source, pattern, `${name} ${pattern}`)
+    }
+  }
+})
+
+// ---------------------------------------------------------------- the stage's files as text
+// voice (modified) and voice-stage (add-voice-stage-and-capture). The mechanism cannot run here, so its rules are read as text.
+
+// voice: "Nothing from another origin" - every import in the five scripts names a file beside it
+test('every import in the five scripts names ./<name>.mjs, a file that is there', () => {
+  let seen = 0
+  for (const name of SCRIPTS) {
+    const source = read(name)
+    const specifiers = [
+      ...[...source.matchAll(/\bimport\s+(?:[^'"`;]*?\s+from\s+)?['"`]([^'"`]+)['"`]/g)].map(m => m[1]),
+      ...[...source.matchAll(/\bimport\s*\(\s*['"`]([^'"`]+)['"`]/g)].map(m => m[1]),
+      ...[...source.matchAll(/\bexport\s+[^'"`;]*?\s+from\s+['"`]([^'"`]+)['"`]/g)].map(m => m[1]),
+    ]
+    for (const specifier of specifiers) {
+      seen += 1
+      assert.match(specifier, /^\.\/[a-z][a-z-]*\.mjs$/, `${name} imports ${specifier}`)
+      assert.ok(existsSync(new URL(`../lib/voice/${specifier.slice(2)}`, import.meta.url)), `${name}: ${specifier} is shipped`)
+    }
+    assert.doesNotMatch(source, /\bimport\s*\(\s*[^'"`\s)]/, `${name} has no computed import`)
+  }
+  assert.ok(seen >= 3, 'page.js, stage.mjs and scene.mjs import the next file down')
+})
+
+// voice-stage: "No text is drawn"
+test('none of the five scripts holds fillText or strokeText', () => {
+  for (const name of SCRIPTS) assert.doesNotMatch(read(name), /\b(?:fillText|strokeText)\b/, name)
+})
+
+// voice-stage: "The canvas is not read out"
+test('page.html holds a canvas with the id stage, hidden from assistive technology, with no text inside', () => {
+  const html = read('page.html')
+  const canvas = element(html, 'stage')
+  assert.equal(canvas.tag, 'canvas')
+  assert.match(canvas.attrs, /aria-hidden\s*=\s*["']true["']/)
+  const inside = canvas.rest.slice(0, canvas.rest.search(/<\/canvas>/i))
+  assert.ok(/<\/canvas>/i.test(canvas.rest), 'the canvas is closed')
+  assert.equal(inside.trim(), '', 'nothing inside the canvas')
+  const status = element(html, 'status')
+  assert.match(status.attrs, /role\s*=\s*["']status["']/)
+})
+
+// voice-stage: "Native controls"
+test('Start, Mute, Stop, Quit and Full screen are buttons and the text field is an input, with no tabindex above 0, role or onclick', () => {
+  const html = read('page.html')
+  for (const id of ['start', 'mute', 'stop', 'quit', 'fullscreen']) assert.equal(element(html, id).tag, 'button', `${id} is a button`)
+  assert.equal(element(html, 'turn').tag, 'input')
+  assert.match(element(html, 'mute').attrs, /aria-pressed\s*=\s*["']false["']/, 'Mute is marked as not pressed')
+  assert.doesNotMatch(html, /\btabindex\s*=\s*["']?[1-9]/i, 'no positive tabindex')
+  assert.doesNotMatch(html, /\brole\s*=\s*["']button["']/i, 'no role="button"')
+  assert.doesNotMatch(html, /\sonclick\s*=/i, 'no onclick attribute')
+  for (const name of SCRIPTS) {
+    const source = read(name)
+    assert.doesNotMatch(source, /tabindex/i, `${name} sets no tabIndex`)
+    assert.doesNotMatch(source, /['"`]role['"`]|\.role\b/, `${name} sets no role`)
+    assert.doesNotMatch(source, /onclick/i, `${name} sets no onclick`)
+  }
+})
+
+// voice-stage: "The focus mark"
+test('page.css holds a :focus-visible rule and never switches the outline off', () => {
+  const css = read('page.css')
+  assert.match(css, /:focus-visible\b/)
+  assert.doesNotMatch(css, /\boutline\s*:\s*(?:none|0)\s*(?:;|!|\}|$)/im)
+})
+
+// voice-stage: "No colour outside the stylesheet"
+test('the page and its scripts hold no # colour, rgb(, hsl( or style attribute', () => {
+  for (const name of ['page.html', ...SCRIPTS]) {
+    const source = read(name)
+    assert.doesNotMatch(source, /#[0-9a-fA-F]{3,8}\b/, `${name} holds a # colour`)
+    assert.doesNotMatch(source, /\brgba?\s*\(/i, `${name} holds rgb(`)
+    assert.doesNotMatch(source, /\bhsla?\s*\(/i, `${name} holds hsl(`)
+    assert.doesNotMatch(source, /\sstyle\s*=|setAttribute\(\s*['"`]style['"`]|\.style\b/i, `${name} holds a style attribute`)
+  }
+})
+
+/** The custom properties of page.css as { name: value }; the first declaration of a name stands. */
+function customProperties() {
+  const css = read('page.css').replace(/\/\*[\s\S]*?\*\//g, '')
+  const properties = {}
+  for (const found of css.matchAll(/(--[a-zA-Z0-9-]+)\s*:\s*([^;}]+?)\s*(?:;|(?=\}))/g)) properties[found[1]] ??= found[2]
+  return properties
+}
+
+// voice-stage: "The tones of the mechanism"
+test('page.css declares the ground, the text and the five tones of the mechanism', () => {
+  const properties = customProperties()
+  for (const name of ['--ground', '--text', '--stage-live', '--stage-rest', '--stage-accent', '--stage-ok', '--stage-fail']) {
+    assert.ok(name in properties, `page.css declares ${name}`)
+  }
+})
+
+// voice-stage: "System fonts only"
+test('page.css holds no @font-face, @import or url(', () => {
+  const css = read('page.css')
+  assert.doesNotMatch(css, /@font-face/i)
+  assert.doesNotMatch(css, /@import/i)
+  assert.doesNotMatch(css, /\burl\s*\(/i)
+})
+
+const luminance = hex => {
+  const [r, g, b] = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255).map(c => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+const contrast = (a, b) => {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+// voice-stage: "Readable text"
+test('every --text colour has a contrast of at least 4.5 to 1 against --ground', () => {
+  const properties = customProperties()
+  assert.match(properties['--ground'] ?? '', /^#[0-9a-fA-F]{6}$/, '--ground is a six-digit hex value')
+  const texts = Object.entries(properties).filter(([name]) => name.startsWith('--text'))
+  assert.ok(texts.length >= 1, 'page.css declares a text colour')
+  for (const [name, value] of texts) {
+    assert.match(value, /^#[0-9a-fA-F]{6}$/, `${name} is a six-digit hex value`)
+    const ratio = contrast(value, properties['--ground'])
+    assert.ok(ratio >= 4.5, `${name} ${value} on ${properties['--ground']} has a contrast of ${ratio.toFixed(2)}`)
+  }
 })

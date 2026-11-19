@@ -26,17 +26,30 @@ const refusal = (request, status, reason) => {
 }
 
 // voice: "Every request is checked before it is served", design §13 route names.
-test('each of the eight paths gives its route', () => {
+// Re-pinned for add-voice-orchestrator, voice-sessions: "The page can read a session's screen as text" (eight paths became thirteen:
+// GET /log with the token in `t`, and POST /confirm, /cancel, /stop and /attach checked as /turn is).
+// Re-pinned for add-voice-stage-and-capture, voice: "The page is served from the package under a strict policy" (thirteen paths
+// became sixteen: GET /gears.mjs, /scene.mjs and /stage.mjs, checked as the other static files are).
+test('each of the sixteen paths gives its route', () => {
   const routes = [
     ['GET', '/', 'page'],
     ['GET', '/page.js', 'script'],
     ['GET', '/page-logic.mjs', 'logic'],
+    ['GET', '/gears.mjs', 'gears'],
+    ['GET', '/scene.mjs', 'scene'],
+    ['GET', '/stage.mjs', 'stage'],
     ['GET', '/page.css', 'style'],
     ['GET', `/events?t=${TOKEN}`, 'events'],
     ['POST', '/turn', 'turn'],
     ['POST', '/interrupt', 'interrupt'],
-    ['POST', '/quit', 'quit']
+    ['POST', '/quit', 'quit'],
+    ['GET', `/log?t=${TOKEN}&id=c7b0ada6`, 'log'],
+    ['POST', '/confirm', 'confirm'],
+    ['POST', '/cancel', 'cancel'],
+    ['POST', '/stop', 'stop'],
+    ['POST', '/attach', 'attach']
   ]
+  assert.equal(routes.length, 16)
   for (const [method, url, route] of routes) {
     assert.deepEqual(checkRequest(req({ method, url }), CTX), { ok: true, route }, `${method} ${url}`)
   }
@@ -137,4 +150,97 @@ test('newToken is 32 lowercase hex characters and differs between calls', () => 
   assert.match(a, /^[0-9a-f]{32}$/)
   assert.match(b, /^[0-9a-f]{32}$/)
   assert.notEqual(a, b)
+})
+
+// voice-sessions: "The page can read a session's screen as text": GET /log carries the token in `t`, as GET /events does.
+test('GET /log without the token is 403 missing or wrong token and with it gives the route log', () => {
+  const reason = 'missing or wrong token'
+  refusal(req({ method: 'GET', url: '/log?id=c7b0ada6' }), 403, reason)
+  refusal(req({ method: 'GET', url: '/log' }), 403, reason)
+  refusal(req({ method: 'GET', url: '/log?t=&id=c7b0ada6' }), 403, reason)
+  refusal(req({ method: 'GET', url: '/log?t=wrong&id=c7b0ada6' }), 403, reason)
+  refusal(req({ method: 'GET', url: `/log?t=${TOKEN.slice(0, 31)}&id=c7b0ada6` }), 403, reason)
+  refusal(req({ method: 'GET', url: '/log?id=c7b0ada6', headers: { 'x-dial-token': TOKEN } }), 403, reason)
+  assert.deepEqual(checkRequest(req({ method: 'GET', url: `/log?id=c7b0ada6&t=${TOKEN}` }), CTX), { ok: true, route: 'log' })
+  assert.deepEqual(checkRequest(req({ method: 'GET', url: `/log?t=${TOKEN}` }), CTX), { ok: true, route: 'log' })
+})
+
+test('GET /log with a foreign Host is 403 wrong host', () => {
+  refusal(req({ method: 'GET', url: `/log?t=${TOKEN}&id=c7b0ada6`, headers: { host: 'evil.example:3425' } }), 403, 'wrong host')
+})
+
+// voice-sessions: the confirm, cancel, stop and attach routes are checked as /turn is.
+const SESSION_POSTS = [['/confirm', 'confirm'], ['/cancel', 'cancel'], ['/stop', 'stop'], ['/attach', 'attach']]
+
+test('POST /confirm, /cancel, /stop and /attach give their routes', () => {
+  for (const [path, route] of SESSION_POSTS) {
+    assert.deepEqual(checkRequest(req({ url: path }), CTX), { ok: true, route }, path)
+    assert.deepEqual(checkRequest(req({ url: path, headers: { 'content-type': 'application/json; charset=utf-8' } }), CTX), { ok: true, route }, `${path} with a charset`)
+  }
+})
+
+test('the four session POSTs need the token header, a same-origin Origin and a JSON content type', () => {
+  for (const [path] of SESSION_POSTS) {
+    for (const token of [undefined, 'wrong', TOKEN.slice(0, 31), '']) {
+      refusal(req({ url: path, headers: { 'x-dial-token': token } }), 403, 'missing or wrong token')
+    }
+    refusal(req({ url: `${path}?t=${TOKEN}`, headers: { 'x-dial-token': undefined } }), 403, 'missing or wrong token')
+    for (const origin of [undefined, 'null', `http://localhost:${PORT}`, 'https://example.com', `https://127.0.0.1:${PORT}`]) {
+      refusal(req({ url: path, headers: { origin } }), 403)
+    }
+    for (const type of [undefined, 'text/plain', 'application/x-www-form-urlencoded']) {
+      refusal(req({ url: path, headers: { 'content-type': type } }), 415)
+    }
+    refusal(req({ url: path, headers: { host: 'evil.example:3425' } }), 403, 'wrong host')
+  }
+})
+
+test('the checks run in the same order for the four session POSTs', () => {
+  for (const [path] of SESSION_POSTS) {
+    refusal(req({ url: path, headers: { 'x-dial-token': 'wrong', origin: undefined, 'content-type': 'text/plain' } }), 403, 'missing or wrong token')
+    refusal(req({ url: path, headers: { origin: undefined, 'content-type': 'text/plain' } }), 403)
+  }
+})
+
+test('GET /confirm, /cancel, /stop and /attach and POST /log are 405 with a reason', () => {
+  for (const [path] of SESSION_POSTS) {
+    for (const method of ['GET', 'PUT']) {
+      const out = refusal(req({ method, url: path }), 405)
+      assert.equal(typeof out.reason, 'string', `${method} ${path}`)
+      assert.ok(out.reason.length > 0, `${method} ${path}`)
+    }
+  }
+  for (const method of ['POST', 'PUT']) {
+    const out = refusal(req({ method, url: `/log?t=${TOKEN}&id=c7b0ada6` }), 405)
+    assert.equal(typeof out.reason, 'string', `${method} /log`)
+    assert.ok(out.reason.length > 0, `${method} /log`)
+  }
+})
+
+// voice: "The scripts of the stage" (the guard side): the three scripts are checked as the other static files are.
+const STAGE_SCRIPTS = [['/gears.mjs', 'gears'], ['/scene.mjs', 'scene'], ['/stage.mjs', 'stage']]
+
+test('GET /gears.mjs, /scene.mjs and /stage.mjs give their routes with the right Host and no token, and ignore a query string', () => {
+  for (const [url, route] of STAGE_SCRIPTS) {
+    assert.deepEqual(checkRequest(req({ method: 'GET', url }), CTX), { ok: true, route }, url)
+    assert.deepEqual(checkRequest(req({ method: 'GET', url: `${url}?t=wrong&x=1` }), CTX), { ok: true, route }, `${url} with a query`)
+  }
+})
+
+test('GET /gears.mjs, /scene.mjs and /stage.mjs with another Host are 403 wrong host', () => {
+  for (const [url] of STAGE_SCRIPTS) {
+    for (const host of [undefined, `localhost:${PORT}`, '127.0.0.1', `127.0.0.1:${PORT + 1}`, `evil.example:${PORT}`]) {
+      refusal(req({ method: 'GET', url, headers: { host } }), 403, 'wrong host')
+    }
+  }
+})
+
+test('POST, PUT and DELETE to /gears.mjs, /scene.mjs and /stage.mjs are 405 with a reason', () => {
+  for (const [url] of STAGE_SCRIPTS) {
+    for (const method of ['POST', 'PUT', 'DELETE']) {
+      const out = refusal(req({ method, url }), 405)
+      assert.equal(typeof out.reason, 'string', `${method} ${url}`)
+      assert.ok(out.reason.length > 0, `${method} ${url}`)
+    }
+  }
 })

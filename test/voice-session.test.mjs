@@ -361,6 +361,34 @@ test('a command is a tool event and its output is not an event', () => {
   assert.deepEqual(events, [{ type: 'tool', command: 'dial context katipon --json' }])
 })
 
+// voice-engine: "A proposal is read from the result of dial propose" - createEngine passes the two effects to on.
+const PROPOSE_CMD = 'dial propose katipon --prompt "/interlock:ship add-parser" --json'
+const toolResult = (id, content, extra = {}) => ({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, ...extra }] } })
+
+test('a propose command gives a tool event and then a proposal event with the repo and the prompt', () => {
+  const { children, events } = running()
+  send(children[0], assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: PROPOSE_CMD } }]))
+  send(children[0], toolResult('toolu_1', '{"proposal":{"repo":"katipon","prompt":"/interlock:ship add-parser"}}'))
+  assert.deepEqual(events, [
+    { type: 'tool', command: PROPOSE_CMD },
+    { type: 'proposal', repo: 'katipon', prompt: '/interlock:ship add-parser' }
+  ])
+})
+
+test('a propose result that cannot be read gives a proposal-unread event', () => {
+  const { children, events } = running()
+  send(children[0], assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: 'dial propose katipon --prompt "x"' } }]))
+  send(children[0], toolResult('toolu_1', 'proposal for katipon: x'))
+  assert.deepEqual(events.slice(1), [{ type: 'proposal-unread' }])
+})
+
+test('a refused propose gives the tool event and nothing more', () => {
+  const { children, events } = running()
+  send(children[0], assistant([{ type: 'tool_use', id: 'toolu_1', name: 'Bash', input: { command: PROPOSE_CMD } }]))
+  send(children[0], toolResult('toolu_1', 'dial: katipon is not a registered repo', { is_error: true }))
+  assert.deepEqual(types(events), ['tool'])
+})
+
 test('lines that are not understood change nothing and the turn goes on', () => {
   const { engine, children, events } = running()
   children[0].line('Warning: something')

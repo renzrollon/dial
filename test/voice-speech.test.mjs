@@ -215,3 +215,103 @@ test('shutdown() kills the running child, resolves, and later sentences start no
   speaker.say('Three.')
   assert.equal(children.length, 1)
 })
+
+// ---------------------------------------------------------------- say(text, done)
+// design §4 and §11: `done(spoken)` is called once, true when that sentence's say process exited 0 and was not
+// stopped, false when it was stopped, failed, was dropped from the queue, or speech is off. The server uses it to
+// decide when a proposal has been read in full (voice-sessions: "Dial reads an open proposal aloud in its own words").
+
+function counted() {
+  const calls = []
+  const done = label => spoken => calls.push([label, spoken])
+  return { calls, done }
+}
+
+test('done(true) is called after the say process exits 0, and not before', () => {
+  const { speaker, children } = setup()
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  assert.deepEqual(calls, [])
+  children[0].exit({ code: 0 })
+  assert.deepEqual(calls, [['one', true]])
+})
+
+test('each queued sentence has its own done, called in order as each is spoken', () => {
+  const { speaker, children } = setup()
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  speaker.say('Two.', done('two'))
+  children[0].exit()
+  assert.deepEqual(calls, [['one', true]])
+  children[1].exit()
+  assert.deepEqual(calls, [['one', true], ['two', true]])
+})
+
+test('stop() calls done(false) for the running sentence and for each queued one, once', () => {
+  const { speaker, children } = setup()
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  speaker.say('Two.', done('two'))
+  speaker.say('Three.', done('three'))
+  speaker.stop()
+  children[0].exit({ code: null, signal: 'SIGTERM' })
+  assert.deepEqual(calls.map(c => c[0]).sort(), ['one', 'three', 'two'])
+  assert.ok(calls.every(c => c[1] === false))
+  assert.equal(calls.length, 3, 'each done exactly once')
+})
+
+test('a sentence that exits 0 after stop() is still reported false', () => {
+  const { speaker, children } = setup()
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  speaker.stop()
+  children[0].exit({ code: 0 })
+  assert.deepEqual(calls, [['one', false]])
+})
+
+test('done(false) at once when speech is not enabled, and no process starts', () => {
+  const { speaker, children } = setup({ enabled: false })
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  assert.deepEqual(calls, [['one', false]])
+  assert.equal(children.length, 0)
+})
+
+test('done(false) at once for a sentence given after speech went quiet', () => {
+  const { speaker, children } = setup()
+  speaker.say('One.')
+  children[0].exit({ code: 1, stderr: 'no voice\n' })
+  const { calls, done } = counted()
+  speaker.say('Two.', done('two'))
+  assert.deepEqual(calls, [['two', false]])
+  assert.equal(children.length, 1)
+})
+
+test('a failing process reports false for its sentence and for each sentence it dropped', () => {
+  const { speaker, children } = setup()
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  speaker.say('Two.', done('two'))
+  children[0].exit({ code: 1, stderr: 'boom\n' })
+  assert.deepEqual(calls.map(c => c[0]).sort(), ['one', 'two'])
+  assert.ok(calls.every(c => c[1] === false))
+  assert.equal(calls.length, 2)
+})
+
+test('a process that could not be started reports false', () => {
+  const { speaker, children } = setup()
+  const { calls, done } = counted()
+  speaker.say('One.', done('one'))
+  children[0].exit({ code: null, error: { code: 'ENOENT', message: 'spawn say ENOENT' } })
+  assert.deepEqual(calls, [['one', false]])
+})
+
+test('say with no callback behaves as before', () => {
+  const { speaker, children } = setup()
+  speaker.say('One.')
+  speaker.say('Two.')
+  children[0].exit()
+  children[1].exit()
+  assert.equal(children.length, 2)
+  assert.equal(speaker.busy, false)
+})

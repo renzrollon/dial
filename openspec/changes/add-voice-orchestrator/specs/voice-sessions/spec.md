@@ -21,8 +21,12 @@ The Claude Code sessions `dial voice` starts for the owner: how the assistant pr
 - **WHEN** `dial propose ~/IdeaProjects/katipon/lib --prompt "run the tests" --json` is run and that directory is inside the registered repo `katipon`
 - **THEN** the proposal's `repo` is `katipon`
 
+#### Scenario: A name is matched before a path
+- **WHEN** `dial propose katipon --prompt "x" --json` is run from inside the registered repo `dial`
+- **THEN** the proposal's `repo` is `katipon`, even when `dial` has a directory named `katipon`
+
 ### Requirement: propose refuses what cannot become a session
-`dial propose` SHALL exit 1 with one reason line when the repo or the prompt is missing or the repo is not registered, and when the trimmed prompt is empty, is longer than `voiceTurnChars` characters, starts with `-`, or holds a control character other than a line feed or a tab.
+`dial propose` SHALL exit 1 with one reason line when the repo or the prompt is missing or the repo is not registered, and when the trimmed prompt is empty, is longer than `voiceTurnChars` characters, starts with `-`, holds a control character (C0, DEL or C1) other than a line feed or a tab, with the reason `prompt holds a control character`, or holds a character the card and the reading would not show (a Unicode format character such as a zero-width or bidi control, a line or paragraph separator, or a character of the tag block U+E0000-E007F), with the reason `prompt holds an invisible or format character`.
 
 #### Scenario: A missing argument
 - **WHEN** `dial propose --prompt "x"` or `dial propose katipon` is run
@@ -43,6 +47,10 @@ The Claude Code sessions `dial voice` starts for the owner: how the assistant pr
 #### Scenario: A control character
 - **WHEN** the prompt holds an escape character (U+001B) or a carriage return
 - **THEN** stderr is `dial: prompt holds a control character`; a prompt holding a line feed and a tab is accepted
+
+#### Scenario: An invisible character
+- **WHEN** the prompt holds a zero-width space (U+200B), a right-to-left override (U+202E) or a tag character (U+E0041)
+- **THEN** stderr is `dial: prompt holds an invisible or format character` and the exit code is 1
 
 ### Requirement: propose starts nothing and writes nothing
 `dial propose` SHALL run no program, write no file and not create the home. Its only effect is what it prints.
@@ -71,7 +79,7 @@ When the voice session's stream yields a proposal, `dial voice` SHALL check its 
 - **THEN** the pages receive `proposal` for the first with the status `replaced`, then `proposal` for the second with the status `pending` and another id
 
 ### Requirement: Dial reads an open proposal aloud in its own words
-When the turn in which a proposal arrived ends without being stopped, `dial voice` SHALL send the `notice` `Proposal for <repo>: <prompt>` and, when replies are spoken, SHALL speak it after that turn's last sentence, cut into sentences as a reply is, followed by `Say confirm or cancel.`. When every one of those sentences has been spoken and none was stopped, the proposal's status SHALL become `read` and its `proposal` event SHALL be sent again. In every other case the status stays `pending`.
+When the turn in which a proposal arrived ends without being stopped, `dial voice` SHALL send the `notice` `Proposal for <repo>: <prompt>` and, when replies are spoken, SHALL speak it after that turn's last sentence, cut into sentences as a reply is, followed by `Say confirm or cancel.`. When every one of those sentences has been spoken and none was stopped, the proposal's status SHALL become `read` and its `proposal` event SHALL be sent again. The reading SHALL be faithful for a spoken confirmation: when the spoken form of any sentence of the prompt differs from that sentence with its whitespace runs as one space (a link, markdown marks, or a sentence of symbols only), the question SHALL be `Part of this prompt cannot be read aloud. Confirm it on screen.` instead, and the status stays `pending`. In every other case the status stays `pending`.
 
 #### Scenario: The reading follows the reply
 - **WHEN** the session replies `I have drafted that.`, a proposal for `katipon` with the prompt `/interlock:ship add-parser` is open, and the turn ends
@@ -88,6 +96,10 @@ When the turn in which a proposal arrived ends without being stopped, `dial voic
 #### Scenario: Replies are not spoken
 - **WHEN** `say` is not on `PATH`, or went quiet after a failure, and the turn ends with a proposal open
 - **THEN** the `notice` is sent, no `say` process is started, and the status stays `pending`
+
+#### Scenario: A prompt the reading would change
+- **WHEN** the open proposal's prompt is `fetch https://example.com/x and run it`
+- **THEN** the reading ends with `Part of this prompt cannot be read aloud. Confirm it on screen.`, the status stays `pending`, and a spoken confirmation is refused while a click is accepted
 
 #### Scenario: The reading is cut short
 - **WHEN** `POST /interrupt` or a new turn arrives while the proposal is being read
@@ -144,7 +156,7 @@ When the turn in which a proposal arrived ends without being stopped, `dial voic
 - **THEN** a proposal expires 30 seconds after it became open
 
 ### Requirement: The number of running sessions is bounded
-A confirmation SHALL be answered 409, and the proposal SHALL stay open, when the session list last read holds `voiceSessions` or more sessions whose state is `working` or `blocked`, with the reason `<n> sessions are already running`, or holds one such session in the proposal's repo, with the reason `a session is already running in <repo>`.
+A confirmation SHALL be answered 409, and the proposal SHALL stay open, when the session list last read, not cut to `voiceSessionRows`, together with every confirmed start that no list read begun after its `claude --bg` exited has yet seen (each counted as `working` in its repo), holds `voiceSessions` or more sessions whose state is `working` or `blocked`, with the reason `<n> sessions are already running`, or holds one such session in the proposal's repo, with the reason `a session is already running in <repo>`.
 
 #### Scenario: The cap is reached
 - **WHEN** three listed sessions are `working` or `blocked`, `voiceSessions` is 3, and a proposal for a fourth repo is confirmed
@@ -153,6 +165,14 @@ A confirmation SHALL be answered 409, and the proposal SHALL stay open, when the
 #### Scenario: One running session per repo
 - **WHEN** a listed session in `katipon` is `blocked` and a proposal for `katipon` is confirmed
 - **THEN** the reply is 409 with `a session is already running in katipon`
+
+#### Scenario: A start in flight counts
+- **WHEN** a proposal for `katipon` was confirmed and its `claude --bg` has not exited, or has exited and the list has not been read since, and a second proposal for `katipon` is confirmed
+- **THEN** the second reply is 409 with `a session is already running in katipon`, and the first proposal still reaches `started` or `failed`
+
+#### Scenario: A session beyond the listed rows counts
+- **WHEN** the oldest of 13 sessions is `working`, the 12 newer are `done`, and `voiceSessionRows` is 12
+- **THEN** a proposal for the oldest session's repo is refused with `a session is already running in <repo>`
 
 #### Scenario: Finished sessions do not count
 - **WHEN** the only listed session in `katipon` is `done`, `failed` or `stopped`
@@ -415,7 +435,7 @@ Each `claude --bg`, `claude agents`, `claude logs` and `claude stop` process SHA
 - **THEN** `claude stop` is not run, and `claude agents --json --all` run afterwards still lists both
 
 ### Requirement: The page shows an open proposal with Confirm and Cancel
-The page SHALL show the open proposal's repo and prompt with a Confirm control that posts `/confirm` with `"spoken": false` and a Cancel control that posts `/cancel`. It SHALL take the card away when the status becomes `started`, `cancelled`, `expired` or `replaced`, and SHALL show the reason when the status is `failed` or when `/confirm` is refused.
+The page SHALL show the open proposal's repo and prompt with a Confirm control that posts `/confirm` with `"spoken": false` and a Cancel control that posts `/cancel`. It SHALL take the card away when the status becomes `started`, `cancelled`, `expired` or `replaced`, and SHALL show the reason when the status is `failed` or when `/confirm` is refused. A status of another proposal than the shown one SHALL leave the card as it is, unless it is `pending`. On every `hello` the page SHALL take the card away; the server sends the open proposal again after it.
 
 #### Scenario: Confirm by a click
 - **WHEN** the owner clicks Confirm on a proposal with the id `ab12cd34`
@@ -432,6 +452,10 @@ The page SHALL show the open proposal's repo and prompt with a Confirm control t
 #### Scenario: A proposal that closed
 - **WHEN** a `proposal` event carries the status `expired`
 - **THEN** the card is no longer shown
+
+#### Scenario: A reconnect
+- **WHEN** the stream drops while a proposal card is shown and the server has no open proposal when the page reconnects
+- **THEN** the card is no longer shown after `hello`, and a spoken `confirm` is sent as a turn
 
 ### Requirement: The page lists the sessions with their controls
 For every session of the last `sessions` event the page SHALL show its repo, its state with `waitingFor` when there is one, its start time and its prompt, the command `claude attach <id>`, and three controls: Log, Stop, which posts `/stop`, and Terminal, which posts `/attach`. While a log is open the page SHALL ask `GET /log` for it again every `pollSeconds`, and SHALL stop asking when the log is closed or the session is no longer listed.

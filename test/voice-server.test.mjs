@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { readFileSync } from 'node:fs'
 import { get as httpGet } from 'node:http'
 import { connect as netConnect, createServer } from 'node:net'
 import { networkInterfaces } from 'node:os'
 import { basename } from 'node:path'
 import { Readable } from 'node:stream'
 import { test } from 'node:test'
-import { createVoice, listenLoopback } from '../lib/voice/server.mjs'
+import { createVoice, listenLoopback, loadVoiceFiles } from '../lib/voice/server.mjs'
 import { fakeBinary, fakeSpawn, fakeTimers, tmp } from './helpers.mjs'
 
 // Requirements of the `voice` delta ("voice runs in the foreground until it is
@@ -23,8 +24,22 @@ import { fakeBinary, fakeSpawn, fakeTimers, tmp } from './helpers.mjs'
 // other is started"). The server runs against plain request and response
 // objects, `fakeSpawn` and `fakeTimers`: no socket, no browser, no `claude`.
 //
+// The add-voice-orchestrator change adds, at the end of this file, the requirements of the `voice-sessions`
+// delta the server joins (proposals, the reading, confirm and cancel, the bounds, the list, notices, the log,
+// stop and attach routes, the bounded claude calls), "Two pages see the same proposal and the same list" of
+// the `voice` delta and "A proposal is read from the result of dial propose" of the `voice-engine` delta.
+// The add-voice-stage-and-capture change adds "The scripts of the stage" of the `voice` delta near the other static
+// files, and, in the proposal section, "An open proposal's event says how long it has left" of the `voice-sessions` delta.
+// The rig answers `claude agents` by itself with a canned list (`agents`), so a test that is not about the
+// list needs nothing from it; `{ agents: 'manual' }` leaves each read to the test. The session calls
+// (`--bg`, `agents`, `logs`, `stop`) are told apart from the voice session by their first argument, and
+// `claudes()` holds the voice session's processes only.
+//
 // Choices this suite pins where design section 13 leaves a shape open:
-//  - `assets` is `{ page, script, logic, style }`, four strings.
+//  - `assets` is `{ page, script, logic, style }`, four strings; add-voice-stage-and-capture adds `gears`, `scene` and `stage`,
+//    seven strings, each served at `/<name>.mjs`.
+//  - `now` (milliseconds, `Date.now` when not given) is the clock the proposals count their time left on; the rig gives
+//    `fakeTimers`' `now`, so it moves with `advance`.
 //  - `limits` is `{ voiceTurnSeconds, voiceCloseSeconds, voiceTurnChars }`, all three given.
 //  - children are told apart by the base name of the file they run: `claude`, `say`, `open`.
 //  - whether `say` is available is read from `env.PATH` (an executable named `say` in it).
@@ -42,7 +57,19 @@ const ASSETS = {
   page: '<!doctype html><title>dial voice PAGE</title>',
   script: '// page.js SCRIPT',
   logic: '// page-logic.mjs LOGIC',
+  gears: '// gears.mjs GEARS',
+  scene: '// scene.mjs SCENE',
+  stage: '// stage.mjs STAGE',
   style: '/* page.css STYLE */'
+}
+const CLAUDE_PATH = '/opt/homebrew/bin/claude'
+const TMP_DIR = '/tmp/dial-voice-tmp'
+const SESSION_CALLS = ['--bg', 'agents', 'logs', 'stop']
+const REGISTRY = {
+  dial_schema: 'dial.registry/1',
+  vaults: { work: '/vaults/work' },
+  repos: ['katipon', 'dial', 'parser', 'escapement'].map(name => ({ path: `/repos/${name}`, vault: 'work', host: 'github' })),
+  limits: {}
 }
 const SAY_DIR = tmp('dial-voice-say-')
 fakeBinary(SAY_DIR, 'say')
@@ -143,9 +170,26 @@ const noRepeats = states => {
 
 /** A voice server over fakes, with helpers to drive it as a page and as the session. */
 function rig(opts = {}) {
-  const { limits = {}, say = true, platform = 'linux', noOpen = true, lang = 'en-US', model = 'sonnet', sayVoice, port = PORT, token = TOKEN } = opts
-  const { spawn, children } = fakeSpawn()
+  const { limits = {}, say = true, platform = 'linux', noOpen = true, lang = 'en-US', model = 'sonnet', sayVoice, port = PORT, token = TOKEN, agents = [] } = opts
+  const base = fakeSpawn()
+  const { children } = base
+  const manual = agents === 'manual'
+  // What `claude agents --json --all` prints: set with `r.agents(list)`; a read ends by itself unless the rig is manual.
+  const answer = { text: manual ? '[]' : J(agents) }
+  const spawn = (file, args = [], options = {}) => {
+    const handle = base.spawn(file, args, options)
+    if (basename(file) === 'claude' && args[0] === 'agents' && !manual) {
+      const child = children.at(-1)
+      queueMicrotask(() => {
+        child.line(answer.text)
+        child.exit({ code: 0 })
+      })
+    }
+    return handle
+  }
   const clock = fakeTimers()
+  const holder = { registry: opts.registry === undefined ? REGISTRY : opts.registry }
+  const writes = []
   const warns = []
   let uuids = 0
   const voice = createVoice({
@@ -154,30 +198,64 @@ function rig(opts = {}) {
     lang,
     model,
     sayVoice,
-    limits: { voiceTurnSeconds: 120, voiceCloseSeconds: 10, voiceTurnChars: 2000, ...limits },
+    limits: {
+      voiceTurnSeconds: 120,
+      voiceCloseSeconds: 10,
+      voiceTurnChars: 2000,
+      subprocessTimeoutSeconds: 10,
+      voiceSessions: 3,
+      voiceSessionPollSeconds: 5,
+      voiceSessionRows: 12,
+      voiceLogLines: 200,
+      voiceProposalSeconds: 120,
+      ...limits
+    },
     cwd: CWD,
     env: { PATH: say ? SAY_DIR : NO_SAY_DIR },
     prompt: PROMPT,
     assets: ASSETS,
     spawn,
     timers: clock.timers,
+    now: clock.now,
     uuid: () => `00000000-0000-4000-8000-${String(++uuids).padStart(12, '0')}`,
     platform,
     noOpen,
-    warn: line => warns.push(line)
+    warn: line => warns.push(line),
+    registry: () => holder.registry,
+    claudePath: CLAUDE_PATH,
+    tmpdir: TMP_DIR,
+    writeFile: (...args) => {
+      writes.push(args)
+    }
   })
   let exitCode
   voice.done.then(code => {
     exitCode = code
   })
   const named = name => children.filter(child => basename(child.file) === name)
+  const isCall = child => SESSION_CALLS.includes(child.args[0])
+  const calls = sub => named('claude').filter(child => child.args[0] === sub)
   const r = {
     voice,
     children,
     warns,
-    claudes: () => named('claude'),
+    writes,
+    claudes: () => named('claude').filter(child => !isCall(child)),
+    starts: () => calls('--bg'),
+    reads: () => calls('agents'),
+    logs: () => calls('logs'),
+    stops: () => calls('stop'),
     says: () => named('say'),
     opens: () => named('open'),
+    attaches: () => named('open').filter(child => child.args.length === 1),
+    /** The list the next `claude agents` read prints (a rig that is not manual answers it by itself). */
+    agents(list) {
+      answer.text = J(list)
+    },
+    /** The registry `registry()` returns from now on (null is a registry that cannot be read). */
+    setRegistry(next) {
+      holder.registry = next
+    },
     finished: () => exitCode !== undefined,
     exitCode: () => exitCode,
     async advance(ms) {
@@ -525,7 +603,9 @@ test('an event stream request with a wrong token or host is answered 403 and joi
 // ---------------------------------------------------------------------------
 // voice: "The page is served from the package under a strict policy"
 
-test('the four paths are served from the assets with their content types and the four headers', T, async () => {
+// Re-pinned for add-voice-stage-and-capture, voice: "The page is served from the package under a strict policy" (four
+// served paths and the page became seven: the page, the five scripts and the style).
+test('the seven paths are served from the assets with their content types and the four headers', T, async () => {
   const r = rig()
   await r.up()
   const cases = [
@@ -533,6 +613,9 @@ test('the four paths are served from the assets with their content types and the
     [`/?t=${TOKEN}`, 'page', /^text\/html; charset=utf-8$/],
     ['/page.js', 'script', /^(text|application)\/javascript\b/],
     ['/page-logic.mjs', 'logic', /^(text|application)\/javascript\b/],
+    ['/gears.mjs', 'gears', /^(text|application)\/javascript\b/],
+    ['/scene.mjs', 'scene', /^(text|application)\/javascript\b/],
+    ['/stage.mjs', 'stage', /^(text|application)\/javascript\b/],
     ['/page.css', 'style', /^text\/css\b/]
   ]
   for (const [path, key, type] of cases) {
@@ -554,6 +637,36 @@ test('the static files need the host and no token', T, async () => {
   assert.equal(res.status, 200)
   const wrong = await r.send({ method: 'GET', url: '/page.js', headers: { host: 'localhost:3425' } })
   assert.equal(wrong.status, 403)
+})
+
+// voice: "The scripts of the stage": 200, `text/javascript; charset=utf-8`, the four headers and the bytes of the shipped
+// file, with the right Host and no token.
+test('the scripts of the stage answer 200 text/javascript; charset=utf-8 with the four headers, the assets and no token', T, async () => {
+  const r = rig()
+  await r.up()
+  for (const name of ['gears', 'scene', 'stage']) {
+    const res = await r.send({ method: 'GET', url: `/${name}.mjs`, headers: { host: HOST } })
+    assert.equal(res.status, 200, name)
+    assert.equal(res.headers['content-type'], 'text/javascript; charset=utf-8', name)
+    assert.equal(res.body(), ASSETS[name], name)
+    assert.equal(res.headers['cache-control'], 'no-store', name)
+    assert.equal(res.headers['x-content-type-options'], 'nosniff', name)
+    assert.equal(res.headers['referrer-policy'], 'no-referrer', name)
+    assert.equal(res.headers['content-security-policy'], CSP, name)
+    const wrong = await r.send({ method: 'GET', url: `/${name}.mjs`, headers: { host: 'localhost:3425' } })
+    assert.equal(wrong.status, 403, `${name} with another host`)
+    const posted = await r.post(`/${name}.mjs`, {})
+    assert.equal(posted.status, 405, `${name} by POST`)
+  }
+})
+
+// voice: "The scripts of the stage": "the bytes of the shipped file". The loader reads the three files beside the others.
+test('loadVoiceFiles reads gears.mjs, scene.mjs and stage.mjs from the package as the assets gears, scene and stage', () => {
+  const out = loadVoiceFiles()
+  assert.equal(out.ok, true, out.reason)
+  for (const name of ['gears', 'scene', 'stage']) {
+    assert.equal(out.assets[name], readFileSync(new URL(`../lib/voice/${name}.mjs`, import.meta.url), 'utf8'), name)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -801,17 +914,21 @@ test('a comment line is sent to every connected page every 15 seconds and not be
   await r.advance(15_000)
   assert.equal(a.comments().length, 2)
   assert.equal(b.comments().length, 2)
-  assert.equal(a.names().filter(n => n !== 'hello' && n !== 'state').length, 0, 'a keepalive is not an event')
+  // Re-pinned for add-voice-orchestrator, voice-sessions: "A page that connects is sent the list and the open proposal"
+  // (the `sessions` event a connecting page receives is not a keepalive either).
+  assert.equal(a.names().filter(n => n !== 'hello' && n !== 'state' && n !== 'sessions').length, 0, 'a keepalive is not an event')
 })
 
 // ---------------------------------------------------------------------------
 // voice: "A page that connects is told the settings and the state"
 
-test('the first two events are hello with the settings and state', T, async () => {
+// Re-pinned for add-voice-orchestrator, voice-sessions: "A page that connects is sent the list and the open proposal"
+// (a page now receives a `sessions` event after `hello` and `state`, so its events are three, not two).
+test('the first events are hello with the settings, state and the session list', T, async () => {
   const r = rig({ lang: 'en-GB', model: 'opus' })
   await r.up()
   const page = await r.connect()
-  assert.deepEqual(page.names(), ['hello', 'state'])
+  assert.deepEqual(page.names(), ['hello', 'state', 'sessions'])
   assert.deepEqual(page.of('hello'), [{ lang: 'en-GB', model: 'opus', speech: true }])
   assert.deepEqual(page.states(), [{ state: 'idle' }])
 })
@@ -833,7 +950,8 @@ test('a page that connects late gets hello, the current state, and only events s
   assert.deepEqual(early.states().at(-1), { state: 'speaking' })
 
   const late = await r.connect()
-  assert.deepEqual(late.names(), ['hello', 'state'])
+  // Re-pinned for add-voice-orchestrator, voice-sessions: "A page that connects is sent the list and the open proposal".
+  assert.deepEqual(late.names(), ['hello', 'state', 'sessions'])
   assert.deepEqual(late.states(), [{ state: 'speaking' }])
   r.claudes()[0].line(delta('Later sentence. '))
   await settle()
@@ -1128,7 +1246,9 @@ test('an interrupt with nothing to stop is answered 200 and sends no event', T, 
 // ---------------------------------------------------------------------------
 // voice-engine: "A command the session runs is shown and not spoken"
 
-test('a command is sent to every page as a tool event and never spoken, and its output is not shown', T, async () => {
+// Re-pinned for add-voice-orchestrator, voice-engine: "A command the session runs is shown and not spoken" (the output
+// of a command other than `dial propose` is still neither shown nor spoken; the one use made of an output is the proposal).
+test('a command other than dial propose is sent to every page as a tool event and never spoken, and its output is not shown', T, async () => {
   const r = rig()
   await r.up()
   const a = await r.connect()
@@ -1226,7 +1346,9 @@ test('a refused session reaches present and later pages, is warned once and ends
   assert.match(r.warns[0], /^(dial: )?voice session refused: it has tools other than Bash: Read$/)
 
   const later = await r.connect()
-  assert.deepEqual(later.names(), ['hello', 'state'])
+  // Re-pinned for add-voice-orchestrator, voice-sessions: "A page that connects is sent the list and the open proposal"
+  // (the list is sent to a page of a refused session too: "The voice session was refused").
+  assert.deepEqual(later.names(), ['hello', 'state', 'sessions'])
   assert.deepEqual(later.states(), [refused])
 
   claude.exit({ code: null, signal: 'SIGTERM' })
@@ -1406,4 +1528,1160 @@ test('closing the listener ends the event streams that are open', T, async t => 
   } finally {
     req.destroy()
   }
+})
+
+// ===========================================================================
+// add-voice-orchestrator: the `voice-sessions` delta as the server joins it.
+
+const SHIP = '/interlock:ship add-parser'
+const entry = (o = {}) => ({
+  id: 'c7b0ada6',
+  cwd: '/repos/katipon',
+  kind: 'background',
+  startedAt: 1794900099451,
+  sessionId: 'c7b0ada6-b039-4dca-8847-cfb263166f6b',
+  name: `dial: ${SHIP}`,
+  state: 'working',
+  ...o
+})
+const proposeUse = (repo, prompt, id = 'toolu_p1') =>
+  J({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Bash', input: { command: `dial propose ${repo} --prompt ${J(prompt)} --json` } }] } })
+const resultOf = (id, content, extra = {}) =>
+  J({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content, ...extra }] } })
+const proposeResult = (repo, prompt, id = 'toolu_p1') => resultOf(id, J({ proposal: { repo, prompt } }))
+
+/** The session proposes `prompt` for `repo`, says `reply` and, with `end`, ends its turn. */
+async function draft(r, { repo = 'katipon', prompt = SHIP, reply = 'I have drafted that.', end = true, id = 'toolu_p1' } = {}) {
+  const claude = r.claudes()[0]
+  claude.line(proposeUse(repo, prompt, id))
+  claude.line(proposeResult(repo, prompt, id))
+  if (reply) {
+    claude.line(delta(`${reply} `))
+    claude.line(blockStop())
+  }
+  if (end) claude.line(result())
+  await settle()
+}
+
+/** Every say process that is waiting runs to its end with exit 0, one after the other. */
+async function speakAll(r) {
+  for (let i = 0; i < 50; i++) {
+    const next = r.says().find(child => !child.exited)
+    if (!next) return
+    next.exit({ code: 0 })
+    await settle()
+  }
+}
+
+const spoken = r => r.says().map(child => child.written.join(''))
+const statuses = page => page.of('proposal').map(p => p.status)
+const shape = p => ({ repo: p.repo, prompt: p.prompt, status: p.status })
+const confirm = (r, id, spokenFlag = false) => r.post('/confirm', { id, spoken: spokenFlag })
+
+/** A server with one page, a turn in progress and a proposal drafted for `katipon`; with `say` it is read aloud. */
+async function drafted(opts = {}, proposal = {}) {
+  const r = rig(opts)
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, proposal)
+  return { r, page, id: page.of('proposal')[0]?.id }
+}
+
+// ---------------------------------------------------------------------------
+// voice-engine: "A proposal is read from the result of dial propose" (the server side)
+
+test('a propose command is shown as a tool event before its proposal event, and its output is not shown', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, { reply: null })
+  const command = `dial propose katipon --prompt ${J(SHIP)} --json`
+  assert.deepEqual(page.of('tool'), [{ command }])
+  assert.ok(page.names().indexOf('tool') < page.names().indexOf('proposal'), page.names().join(','))
+  assert.equal(page.res.body().includes('\\"proposal\\":{'), false, 'the result text is not an event')
+})
+
+test('a propose result that is not a proposal gives one error and no proposal', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  const claude = r.claudes()[0]
+  claude.line(proposeUse('katipon', 'run the tests'))
+  claude.line(resultOf('toolu_p1', 'proposal for katipon: run the tests'))
+  await settle()
+  assert.deepEqual(page.of('error'), [{ message: 'a proposal could not be read; nothing is pending' }])
+  assert.deepEqual(page.of('proposal'), [])
+})
+
+test('a propose result that is an error gives no error event and no proposal', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in nowhere')
+  const claude = r.claudes()[0]
+  claude.line(proposeUse('nowhere', 'x'))
+  claude.line(resultOf('toolu_p1', 'dial: nowhere is not a registered repo', { is_error: true }))
+  await settle()
+  assert.deepEqual(page.of('error'), [])
+  assert.deepEqual(page.of('proposal'), [])
+})
+
+test('the output of another command is never a proposal', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('what is next')
+  const claude = r.claudes()[0]
+  claude.line(toolUse('dial context katipon --json'))
+  claude.line(resultOf('toolu_1', J({ proposal: { repo: 'katipon', prompt: SHIP } })))
+  await settle()
+  assert.deepEqual(page.of('proposal'), [])
+  assert.deepEqual(page.of('error'), [])
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "A proposal from the voice session becomes the one open proposal"
+
+test('a proposal is sent to every page as pending with an 8-character id', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const a = await r.connect()
+  const b = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r)
+  for (const page of [a, b]) {
+    assert.equal(page.of('proposal').length, 1)
+    const [p] = page.of('proposal')
+    assert.match(p.id, /^[0-9a-f]{8}$/)
+    // Re-pinned for add-voice-stage-and-capture, voice-sessions: "An open proposal's event says how long it has left"
+    // (an open proposal's event also carries `seconds` and `secondsLeft`).
+    assert.deepEqual(Object.keys(p).sort(), ['id', 'prompt', 'repo', 'secondsLeft', 'seconds', 'status'].sort())
+    assert.deepEqual(shape(p), { repo: 'katipon', prompt: SHIP, status: 'pending' })
+  }
+  assert.equal(a.of('proposal')[0].id, b.of('proposal')[0].id)
+})
+
+test('a proposal for a repo unregistered meanwhile is one error and no proposal is open', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  r.setRegistry({ ...REGISTRY, repos: REGISTRY.repos.filter(repo => !repo.path.endsWith('/katipon')) })
+  await draft(r)
+  assert.deepEqual(page.of('error'), [{ message: 'proposal refused: katipon is not a registered repo' }])
+  assert.deepEqual(page.of('proposal'), [])
+  assert.deepEqual(page.of('notice'), [])
+  assert.deepEqual(spoken(r), ['I have drafted that.'], 'no reading, and the error is not spoken')
+  const res = await confirm(r, '00000000')
+  assert.equal(res.status, 409)
+  assert.equal(res.json().reason, 'no such proposal')
+  assert.equal(r.starts().length, 0)
+})
+
+test('a prompt that fails the check is refused with its reason', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship it')
+  await draft(r, { prompt: '--dangerously-skip-permissions', reply: null })
+  assert.deepEqual(page.of('error'), [{ message: 'proposal refused: prompt cannot start with -' }])
+  assert.deepEqual(page.of('proposal'), [])
+})
+
+test('a proposal is checked against the registry as it is at that moment, not as it was at start', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship it')
+  r.setRegistry({ ...REGISTRY, repos: [...REGISTRY.repos, { path: '/repos/newrepo', vault: 'work', host: 'github' }] })
+  await draft(r, { repo: 'newrepo', reply: null })
+  assert.deepEqual(page.of('error'), [])
+  assert.deepEqual(page.of('proposal').map(shape), [{ repo: 'newrepo', prompt: SHIP, status: 'pending' }])
+})
+
+test('a newer proposal replaces the open one: the first is replaced, then the second is pending with another id', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship it')
+  await draft(r, { reply: null, end: false })
+  await draft(r, { repo: 'dial', prompt: 'run the tests', reply: null, id: 'toolu_p2' })
+  assert.deepEqual(page.of('proposal').map(p => [p.repo, p.status]), [['katipon', 'pending'], ['katipon', 'replaced'], ['dial', 'pending']])
+  const [first, , second] = page.of('proposal')
+  assert.notEqual(first.id, second.id)
+  assert.equal((await confirm(r, first.id)).status, 409, 'the replaced proposal is closed')
+  assert.equal((await confirm(r, second.id)).status, 202)
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "An open proposal's event says how long it has left"
+
+const timeLeft = p => ({ seconds: p.seconds, secondsLeft: p.secondsLeft })
+const hasTime = p => Object.hasOwn(p, 'seconds') || Object.hasOwn(p, 'secondsLeft')
+
+test('a new proposal is sent pending with seconds 120 and secondsLeft 120', T, async () => {
+  const { page } = await drafted({ say: false })
+  assert.deepEqual(page.of('proposal').map(p => [p.status, ...Object.values(timeLeft(p))]), [['pending', 120, 120]])
+})
+
+test('seconds is the value of voiceProposalSeconds: 30 gives seconds 30 and secondsLeft 30', T, async () => {
+  const { page } = await drafted({ say: false, limits: { voiceProposalSeconds: 30 } })
+  assert.deepEqual(timeLeft(page.of('proposal')[0]), { seconds: 30, secondsLeft: 30 })
+})
+
+test('read aloud later: the read event says seconds 120 and secondsLeft 30 after 90 seconds', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, { end: false })
+  await r.advance(90_000)
+  r.claudes()[0].line(result())
+  await settle()
+  await speakAll(r)
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+  assert.deepEqual(timeLeft(page.of('proposal')[0]), { seconds: 120, secondsLeft: 120 }, 'the pending event keeps its number')
+  assert.deepEqual(timeLeft(page.of('proposal')[1]), { seconds: 120, secondsLeft: 30 })
+})
+
+test('a page that connects 100 seconds after the proposal became open is sent secondsLeft 20', T, async () => {
+  const { r, page } = await drafted({ say: false })
+  await r.advance(100_000)
+  const late = await r.connect()
+  assert.deepEqual(late.of('proposal').map(p => [p.status, ...Object.values(timeLeft(p))]), [['pending', 120, 20]])
+  assert.equal(page.of('proposal')[0].secondsLeft, 120, 'the page that was there keeps the event it was sent')
+})
+
+test('a page that connects 99.5 seconds after the proposal became open is sent secondsLeft 21, rounded up', T, async () => {
+  const { r } = await drafted({ say: false })
+  await r.advance(99_500)
+  const late = await r.connect()
+  assert.deepEqual(timeLeft(late.of('proposal')[0]), { seconds: 120, secondsLeft: 21 })
+})
+
+test('a proposal that closed holds neither seconds nor secondsLeft, whichever status closed it', T, async () => {
+  const cancelled = await drafted({ say: false })
+  await cancelled.r.post('/cancel', { id: cancelled.id })
+  const expired = await drafted({ say: false })
+  await expired.r.advance(120_000)
+  const started = await drafted({ say: false })
+  await confirm(started.r, started.id)
+  started.r.starts()[0].exit({ code: 0 })
+  await settle()
+  const failed = await drafted({ say: false })
+  await confirm(failed.r, failed.id)
+  failed.r.starts()[0].exit({ code: 1, stderr: 'boom\n' })
+  await settle()
+  const replaced = await drafted({ say: false })
+  await replaced.r.turn('and another')
+  await draft(replaced.r, { repo: 'dial', prompt: 'run the tests', reply: null, id: 'toolu_p2' })
+  for (const [name, { page }, last] of [
+    ['cancelled', cancelled, 'cancelled'],
+    ['expired', expired, 'expired'],
+    ['started', started, 'started'],
+    ['failed', failed, 'failed'],
+    ['replaced', replaced, 'replaced']
+  ]) {
+    const closed = page.of('proposal').find(p => p.status === last)
+    assert.ok(closed, `${name}: ${statuses(page)}`)
+    assert.equal(hasTime(closed), false, `${name} holds neither number`)
+    for (const p of page.of('proposal')) assert.equal(hasTime(p), p.status === 'pending' || p.status === 'read', `${name}: ${p.status}`)
+  }
+})
+
+test('a late page after the proposal closed is sent no time and no proposal', T, async () => {
+  const { r } = await drafted({ say: false })
+  await r.advance(120_000)
+  const late = await r.connect()
+  assert.deepEqual(late.of('proposal'), [])
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "Dial reads an open proposal aloud in its own words"
+
+test('the reading follows the reply, and the status becomes read after the last say has exited', T, async () => {
+  const { r, page } = await drafted()
+  assert.deepEqual(page.of('notice'), [{ text: `Proposal for katipon: ${SHIP}` }])
+  assert.deepEqual(spoken(r), ['I have drafted that.'], 'one say at a time')
+  const id = page.of('proposal')[0].id
+  r.says()[0].exit({ code: 0 })
+  await settle()
+  r.says()[1].exit({ code: 0 })
+  await settle()
+  assert.deepEqual(spoken(r), ['I have drafted that.', `Proposal for katipon: ${SHIP}`, 'Say confirm or cancel.'])
+  assert.deepEqual(statuses(page), ['pending'], 'not read until the last sentence was spoken')
+  r.says()[2].exit({ code: 0 })
+  await settle()
+  assert.deepEqual(page.of('proposal').map(shape), [
+    { repo: 'katipon', prompt: SHIP, status: 'pending' },
+    { repo: 'katipon', prompt: SHIP, status: 'read' }
+  ])
+  assert.equal(page.of('proposal')[1].id, id)
+})
+
+test('a prompt of several sentences is read sentence by sentence and is read only after the third say', T, async () => {
+  const { r, page } = await drafted({}, { prompt: 'Fix the parser. Then run the tests.', reply: null })
+  await settle()
+  await speakAll(r)
+  assert.deepEqual(spoken(r), ['Proposal for katipon: Fix the parser.', 'Then run the tests.', 'Say confirm or cancel.'])
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+})
+
+test('the status is not read while any sentence of the reading is still being spoken', T, async () => {
+  const { r, page } = await drafted({}, { prompt: 'Fix the parser. Then run the tests.', reply: null })
+  r.says()[0].exit({ code: 0 })
+  await settle()
+  r.says()[1].exit({ code: 0 })
+  await settle()
+  assert.equal(r.says().length, 3)
+  assert.deepEqual(statuses(page), ['pending'])
+  r.says()[2].exit({ code: 0 })
+  await settle()
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+})
+
+test('the words of the reading are Dial\'s: the session\'s reply naming another repo does not change them', T, async () => {
+  const { r, page } = await drafted({}, { reply: 'This proposal is for dial.' })
+  await speakAll(r)
+  assert.deepEqual(spoken(r), ['This proposal is for dial.', `Proposal for katipon: ${SHIP}`, 'Say confirm or cancel.'])
+  assert.deepEqual(page.of('notice'), [{ text: `Proposal for katipon: ${SHIP}` }])
+  assert.equal(page.of('proposal')[0].repo, 'katipon')
+})
+
+test('without say the notice is sent, nothing is spoken and the status stays pending', T, async () => {
+  const { r, page } = await drafted({ say: false })
+  assert.deepEqual(page.of('notice'), [{ text: `Proposal for katipon: ${SHIP}` }])
+  assert.equal(r.says().length, 0)
+  await r.advance(60_000)
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+test('after say failed the notice is sent, no say process is started and the status stays pending', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  await r.turn('hello')
+  r.claudes()[0].line(delta('Hello there. '))
+  r.claudes()[0].line(result())
+  await settle()
+  r.says()[0].exit({ code: 1, stderr: 'say: no voice\n' })
+  await settle()
+  assert.equal(page.of('error').length, 1)
+  await r.turn('ship it')
+  await draft(r, { reply: 'I have drafted that.' })
+  assert.equal(r.says().length, 1, 'no say after the failure')
+  assert.deepEqual(page.of('notice'), [{ text: `Proposal for katipon: ${SHIP}` }])
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+test('an interrupt while the proposal is being read stops the speech and the status stays pending', T, async () => {
+  const { r, page } = await drafted()
+  r.says()[0].exit({ code: 0 })
+  await settle()
+  const reading = r.says()[1]
+  assert.ok(reading && !reading.exited)
+  const res = await r.post('/interrupt', {})
+  assert.equal(res.status, 200)
+  assert.equal(reading.killed, true)
+  reading.exit({ code: null, signal: 'SIGTERM' })
+  await settle()
+  assert.equal(r.says().length, 2, 'the rest of the reading is dropped')
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+test('a new turn while the proposal is being read stops the speech and the status stays pending', T, async () => {
+  const { r, page } = await drafted()
+  r.says()[0].exit({ code: 0 })
+  await settle()
+  const reading = r.says()[1]
+  await r.turn('wait, what is next')
+  assert.equal(reading.killed, true)
+  reading.exit({ code: null, signal: 'SIGTERM' })
+  await settle()
+  assert.equal(r.says().length, 2)
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+test('a turn that was interrupted before it ended reads nothing and the status stays pending', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, { end: false })
+  assert.deepEqual(statuses(page), ['pending'])
+  const res = await r.post('/interrupt', {})
+  assert.equal(res.status, 200)
+  r.claudes()[0].exit({ code: null, signal: 'SIGTERM' })
+  await settle()
+  assert.deepEqual(page.of('notice'), [])
+  assert.deepEqual(spoken(r), ['I have drafted that.'])
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+test('a turn stopped after voiceTurnSeconds reads nothing and the status stays pending', T, async () => {
+  const r = rig({ limits: { voiceTurnSeconds: 30 } })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, { end: false, reply: null })
+  await r.advance(30_000)
+  assert.deepEqual(page.of('error'), [{ message: 'the turn was stopped after 30 seconds' }])
+  assert.deepEqual(page.of('notice'), [])
+  assert.equal(r.says().length, 0)
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "Confirm starts the open proposal"
+
+test('a click confirms a pending proposal: 202, the status starting, claude started once', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  const res = await confirm(r, id)
+  assert.equal(res.status, 202)
+  assert.deepEqual(res.json(), { ok: true })
+  assert.deepEqual(statuses(page), ['pending', 'starting'])
+  assert.equal(r.starts().length, 1)
+})
+
+test('a spoken confirmation before the reading is 409 and claude is not started', T, async () => {
+  const { r, page, id } = await drafted()
+  assert.deepEqual(statuses(page), ['pending'])
+  const res = await confirm(r, id, true)
+  assert.equal(res.status, 409)
+  assert.equal(res.json().ok, false)
+  assert.equal(res.json().reason, 'the proposal was not read aloud; confirm it on screen')
+  assert.equal(r.starts().length, 0)
+  assert.deepEqual(statuses(page), ['pending'])
+})
+
+test('a spoken confirmation after the reading is 202 and the session is started', T, async () => {
+  const { r, page, id } = await drafted()
+  await speakAll(r)
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+  const res = await confirm(r, id, true)
+  assert.equal(res.status, 202)
+  assert.deepEqual(res.json(), { ok: true })
+  assert.equal(r.starts().length, 1)
+  assert.deepEqual(statuses(page), ['pending', 'read', 'starting'])
+})
+
+test('a click confirms a proposal that has been read as well', T, async () => {
+  const { r, id } = await drafted()
+  await speakAll(r)
+  assert.equal((await confirm(r, id, false)).status, 202)
+})
+
+test('a proposal that is not open is 409 no such proposal and claude is not started', T, async () => {
+  const unknown = await drafted({ say: false })
+  const res = await confirm(unknown.r, '00000000')
+  assert.equal(res.status, 409)
+  assert.equal(res.json().reason, 'no such proposal')
+
+  const cancelled = await drafted({ say: false })
+  assert.equal((await cancelled.r.post('/cancel', { id: cancelled.id })).status, 200)
+  assert.equal((await confirm(cancelled.r, cancelled.id)).json().reason, 'no such proposal')
+
+  const expired = await drafted({ say: false })
+  await expired.r.advance(120_000)
+  assert.equal((await confirm(expired.r, expired.id)).status, 409)
+
+  const replaced = await drafted({ say: false, agents: [] }, { reply: null, end: false })
+  await draft(replaced.r, { repo: 'dial', prompt: 'run the tests', reply: null, id: 'toolu_p2' })
+  assert.equal((await confirm(replaced.r, replaced.id)).json().reason, 'no such proposal')
+
+  const started = await drafted({ say: false })
+  assert.equal((await confirm(started.r, started.id)).status, 202)
+  started.r.starts()[0].exit({ code: 0 })
+  await settle()
+  const again = await confirm(started.r, started.id)
+  assert.equal(again.status, 409)
+  assert.equal(again.json().reason, 'no such proposal')
+  assert.equal(started.r.starts().length, 1)
+
+  for (const rig2 of [unknown, cancelled, expired]) assert.equal(rig2.r.starts().length, 0)
+  assert.equal(replaced.r.starts().length, 0)
+})
+
+test('a second confirmation while the first is starting is 409 and claude is started once', T, async () => {
+  const { r, id } = await drafted({ say: false })
+  const first = await confirm(r, id)
+  const second = await confirm(r, id)
+  assert.equal(first.status, 202)
+  assert.equal(second.status, 409)
+  assert.equal(second.json().reason, 'no such proposal')
+  assert.equal(r.starts().length, 1)
+})
+
+test('a body that is not a confirmation is 400 and nothing is started', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  for (const body of [{ id: 5 }, { id: 'ab12cd34' }, [], 'not json {', { id, spoken: 'yes' }, { spoken: false }]) {
+    const res = await r.post('/confirm', body)
+    assert.equal(res.status, 400, J(body))
+    assert.equal(res.json().ok, false, J(body))
+  }
+  assert.equal(r.starts().length, 0)
+  assert.deepEqual(statuses(page), ['pending'])
+  assert.equal((await confirm(r, id)).status, 202, 'the proposal is still open')
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "Cancel and time close a proposal"
+
+test('cancel is 200 and the status cancelled, and a later confirm is 409', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  const res = await r.post('/cancel', { id })
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.json(), { ok: true })
+  assert.deepEqual(statuses(page), ['pending', 'cancelled'])
+  assert.equal((await confirm(r, id)).status, 409)
+  assert.equal(r.starts().length, 0)
+})
+
+test('cancel with another id is 409 no such proposal and the proposal stays open', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  const res = await r.post('/cancel', { id: '00000000' })
+  assert.equal(res.status, 409)
+  assert.equal(res.json().reason, 'no such proposal')
+  assert.deepEqual(statuses(page), ['pending'])
+  assert.equal((await confirm(r, id)).status, 202)
+})
+
+test('a proposal expires after voiceProposalSeconds and is no longer open', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  await r.advance(119_999)
+  assert.deepEqual(statuses(page), ['pending'])
+  await r.advance(1)
+  assert.deepEqual(statuses(page), ['pending', 'expired'])
+  assert.equal((await confirm(r, id)).status, 409)
+})
+
+test('reading does not extend the time: open 100 s ago and read 10 s ago it expires 20 s later', T, async () => {
+  const r = rig()
+  await r.up()
+  const page = await r.connect()
+  await r.turn('ship add-parser in katipon')
+  await draft(r, { end: false })
+  await r.advance(90_000)
+  r.claudes()[0].line(result())
+  await settle()
+  await speakAll(r)
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+  await r.advance(10_000)
+  await r.advance(19_999)
+  assert.deepEqual(statuses(page), ['pending', 'read'])
+  await r.advance(1)
+  assert.deepEqual(statuses(page), ['pending', 'read', 'expired'])
+})
+
+test('the expiry is read from the limits: 30 seconds when voiceProposalSeconds is 30', T, async () => {
+  const { r, page } = await drafted({ say: false, limits: { voiceProposalSeconds: 30 } })
+  await r.advance(29_999)
+  assert.deepEqual(statuses(page), ['pending'])
+  await r.advance(1)
+  assert.deepEqual(statuses(page), ['pending', 'expired'])
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "The number of running sessions is bounded"
+
+test('with three sessions running a fourth is 409 n sessions are already running and the proposal stays open', T, async () => {
+  const running = [
+    entry({ id: 'aaaaaaa1', cwd: '/repos/katipon', state: 'working', startedAt: 1000 }),
+    entry({ id: 'aaaaaaa2', cwd: '/repos/dial', state: 'blocked', waitingFor: 'permission prompt', startedAt: 2000 }),
+    entry({ id: 'aaaaaaa3', cwd: '/repos/parser', state: 'working', startedAt: 3000 })
+  ]
+  const { r, page, id } = await drafted({ say: false, agents: running }, { repo: 'escapement', prompt: 'run the tests', reply: null })
+  const res = await confirm(r, id)
+  assert.equal(res.status, 409)
+  assert.equal(res.json().reason, '3 sessions are already running')
+  assert.equal(r.starts().length, 0)
+  assert.deepEqual(statuses(page), ['pending'])
+
+  r.agents([running[0], running[1]])
+  await r.advance(5000)
+  assert.equal((await confirm(r, id)).status, 202, 'the proposal was kept, and a slot is free')
+})
+
+test('the cap is read from the limits: voiceSessions 1 refuses a second session with 1 sessions are already running', T, async () => {
+  const { r, id } = await drafted({ say: false, limits: { voiceSessions: 1 }, agents: [entry({ cwd: '/repos/dial' })] })
+  const res = await confirm(r, id)
+  assert.equal(res.status, 409)
+  assert.equal(res.json().reason, '1 sessions are already running')
+})
+
+test('a blocked session in the proposal\'s repo is 409 a session is already running in the repo', T, async () => {
+  const { r, id } = await drafted({ say: false, agents: [entry({ state: 'blocked', waitingFor: 'permission prompt' })] })
+  const res = await confirm(r, id)
+  assert.equal(res.status, 409)
+  assert.equal(res.json().reason, 'a session is already running in katipon')
+  assert.equal(r.starts().length, 0)
+})
+
+test('finished sessions do not count: done, failed and stopped in the repo do not stop a confirmation', T, async () => {
+  for (const state of ['done', 'failed', 'stopped']) {
+    const { r, id } = await drafted({ say: false, agents: [entry({ state })] })
+    assert.equal((await confirm(r, id)).status, 202, state)
+    assert.equal(r.starts().length, 1, state)
+  }
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "A confirmed proposal starts one claude background session"
+
+test('claude is run in the repo\'s registered path with exactly four arguments and the server\'s environment', T, async () => {
+  const { r, id } = await drafted({ say: false })
+  await confirm(r, id)
+  const [child] = r.starts()
+  assert.equal(child.file, CLAUDE_PATH)
+  assert.deepEqual(child.args, ['--bg', '--name', `dial: ${SHIP}`, SHIP])
+  assert.equal(child.cwd, '/repos/katipon')
+  assert.deepEqual(child.env, { PATH: NO_SAY_DIR })
+})
+
+test('a long prompt of several lines is passed unchanged and named by its first 60 characters on one line', T, async () => {
+  const prompt = `${'alpha beta gamma delta\n'.repeat(13)}end`.slice(0, 300)
+  const { r, id } = await drafted({ say: false }, { prompt, reply: null })
+  await confirm(r, id)
+  const [child] = r.starts()
+  assert.equal(child.args[3], prompt)
+  assert.equal(child.args[2], `dial: ${prompt.replace(/\s+/g, ' ').slice(0, 60)}`)
+  assert.equal(child.args.length, 4)
+})
+
+test('none of the owner\'s settings is overridden by an argument of the start', T, async () => {
+  const { r, id } = await drafted({ say: false })
+  await confirm(r, id)
+  const args = r.starts()[0].args
+  for (const flag of ['--permission-mode', '--dangerously-skip-permissions', '--model', '--settings', '--worktree', '--safe-mode', '--restricted', '-p']) {
+    assert.equal(args.includes(flag), false, flag)
+  }
+})
+
+test('a session that started: the status started, the notice Started in the repo, and the list is read at once', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  await confirm(r, id)
+  const reads = r.reads().length
+  r.starts()[0].exit({ code: 0 })
+  await settle()
+  assert.deepEqual(statuses(page), ['pending', 'starting', 'started'])
+  assert.ok(page.of('notice').some(n => n.text === 'Started in katipon.'), J(page.of('notice')))
+  assert.equal(r.reads().length, reads + 1, 'no wait for the next interval')
+  assert.deepEqual(r.reads().at(-1).args, ['agents', '--json', '--all'])
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "A start that fails is reported in claude's own words"
+
+test('a repo Claude Code does not trust: the status failed with claude\'s own line, and nothing is spoken', T, async () => {
+  const { r, page, id } = await drafted()
+  await speakAll(r)
+  const before = r.says().length
+  await confirm(r, id, true)
+  const line = 'Workspace not trusted. Run claude in /repos/katipon once and accept the trust prompt, then retry.'
+  r.starts()[0].exit({ code: 1, stderr: `${line}\n` })
+  await settle()
+  const last = page.of('proposal').at(-1)
+  assert.equal(last.status, 'failed')
+  assert.equal(last.reason, `claude --bg failed (exit 1): ${line}`)
+  assert.equal(r.says().length, before, 'no say process for a failure')
+  assert.equal(page.of('notice').some(n => /^Started/.test(n.text)), false)
+})
+
+test('the line is on stdout: it is the reason when stderr is empty, and without any line the reason is the exit alone', T, async () => {
+  const one = await drafted({ say: false })
+  await confirm(one.r, one.id)
+  one.r.starts()[0].line('Workspace not trusted.')
+  one.r.starts()[0].exit({ code: 1 })
+  await settle()
+  assert.equal(one.page.of('proposal').at(-1).reason, 'claude --bg failed (exit 1): Workspace not trusted.')
+
+  const none = await drafted({ say: false })
+  await confirm(none.r, none.id)
+  none.r.starts()[0].exit({ code: 1 })
+  await settle()
+  assert.equal(none.page.of('proposal').at(-1).reason, 'claude --bg failed (exit 1)')
+})
+
+test('claude that cannot be started gives the reason claude could not be started with the code', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  await confirm(r, id)
+  r.starts()[0].exit({ code: null, error: Object.assign(new Error('spawn claude ENOENT'), { code: 'ENOENT' }) })
+  await settle()
+  const last = page.of('proposal').at(-1)
+  assert.equal(last.status, 'failed')
+  assert.ok(last.reason.startsWith('claude could not be started (ENOENT: '), last.reason)
+})
+
+test('a start that hangs is ended after subprocessTimeoutSeconds and the reason is the time waited', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  await confirm(r, id)
+  await r.advance(9_999)
+  assert.equal(r.starts()[0].killed, false)
+  await r.advance(1)
+  assert.equal(r.starts()[0].killed, true)
+  r.starts()[0].exit({ code: null, signal: 'SIGTERM' })
+  await settle()
+  const last = page.of('proposal').at(-1)
+  assert.equal(last.status, 'failed')
+  assert.equal(last.reason, 'claude --bg did not answer in 10 seconds')
+})
+
+test('a failed start is not tried again until another proposal is confirmed', T, async () => {
+  const { r, page, id } = await drafted({ say: false })
+  await confirm(r, id)
+  r.starts()[0].exit({ code: 1, stderr: 'boom\n' })
+  await settle()
+  await r.advance(60_000)
+  assert.equal(r.starts().length, 1)
+  assert.equal((await confirm(r, id)).status, 409)
+  assert.equal(r.starts().length, 1)
+  assert.equal(page.of('proposal').at(-1).status, 'failed')
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "A page that connects is sent the list and the open proposal"
+
+test('a late page gets hello, state, the two sessions and the proposal that was read, in that order', T, async () => {
+  const list = [entry({ id: 'c7b0ada6', state: 'blocked', waitingFor: 'permission prompt', startedAt: 2000 }), entry({ id: '0f3e9a11', cwd: '/repos/dial', state: 'done', startedAt: 1000 })]
+  const { r, id } = await drafted({ agents: list })
+  await speakAll(r)
+  const late = await r.connect()
+  assert.deepEqual(late.names(), ['hello', 'state', 'sessions', 'proposal'])
+  const [sessions] = late.of('sessions')
+  assert.deepEqual(sessions.sessions.map(s => s.id), ['c7b0ada6', '0f3e9a11'])
+  assert.equal(sessions.pollSeconds, 5)
+  assert.deepEqual(late.of('proposal').map(shape), [{ repo: 'katipon', prompt: SHIP, status: 'read' }])
+  assert.equal(late.of('proposal')[0].id, id)
+})
+
+test('the first page is sent an empty list at once, and a second sessions event when the first read finds sessions', T, async () => {
+  const r = rig({ agents: 'manual' })
+  await r.up()
+  const page = await r.connect()
+  assert.deepEqual(page.names(), ['hello', 'state', 'sessions'])
+  assert.deepEqual(page.of('sessions')[0].sessions, [])
+  assert.equal(r.reads().length, 1)
+  r.reads()[0].line(J([entry()]))
+  r.reads()[0].exit({ code: 0 })
+  await settle()
+  assert.equal(page.of('sessions').length, 2)
+  assert.deepEqual(page.of('sessions')[1].sessions.map(s => s.id), ['c7b0ada6'])
+})
+
+test('a page that connects while no proposal is open is sent no proposal event', T, async () => {
+  const r = rig({ say: false })
+  await r.up()
+  const page = await r.connect()
+  assert.deepEqual(page.of('proposal'), [])
+})
+
+// ---------------------------------------------------------------------------
+// voice: "Two pages see the same proposal and the same list"
+
+test('two pages receive the same proposal event and the same sessions event', T, async () => {
+  const r = rig({ say: false, agents: [entry({ state: 'working' })] })
+  await r.up()
+  const a = await r.connect()
+  const b = await r.connect()
+  await r.turn('ship add-parser in dial')
+  await draft(r, { repo: 'dial', reply: null })
+  r.agents([entry({ state: 'done' })])
+  await r.advance(5000)
+  assert.equal(a.of('proposal').length, 1)
+  assert.deepEqual(a.of('proposal'), b.of('proposal'))
+  assert.ok(a.of('sessions').length >= 2)
+  assert.deepEqual(a.of('sessions').at(-1), b.of('sessions').at(-1))
+  assert.equal(a.of('sessions').at(-1).sessions[0].state, 'done')
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "A notice is shown, and spoken only when no turn is running"
+
+test('a notice while Dial is idle is shown and spoken, and the state is speaking and then idle', T, async () => {
+  const r = rig({ agents: [entry({ cwd: '/repos/dial', state: 'working' })] })
+  await r.up()
+  const page = await r.connect()
+  r.agents([entry({ cwd: '/repos/dial', state: 'done' })])
+  await r.advance(5000)
+  assert.deepEqual(page.of('notice'), [{ text: 'The session in dial has finished its turn.' }])
+  assert.deepEqual(spoken(r), ['The session in dial has finished its turn.'])
+  assert.deepEqual(page.states().at(-1), { state: 'speaking' })
+  r.says()[0].exit({ code: 0 })
+  await settle()
+  assert.deepEqual(page.states(), [{ state: 'idle' }, { state: 'speaking' }, { state: 'idle' }])
+})
+
+test('a notice during a turn is shown and not spoken', T, async () => {
+  const r = rig({ agents: [entry({ state: 'working' })] })
+  await r.up()
+  const page = await r.connect()
+  await r.turn('what needs me')
+  assert.deepEqual(page.states().at(-1), { state: 'thinking' })
+  r.agents([entry({ state: 'blocked', waitingFor: 'permission prompt' })])
+  await r.advance(5000)
+  assert.deepEqual(page.of('notice'), [{ text: 'The session in katipon needs you: permission prompt.' }])
+  assert.equal(r.says().length, 0)
+  assert.deepEqual(page.states().at(-1), { state: 'thinking' })
+})
+
+test('without say a notice is shown and the state does not change', T, async () => {
+  const r = rig({ say: false, agents: [entry({ state: 'working' })] })
+  await r.up()
+  const page = await r.connect()
+  r.agents([entry({ state: 'failed' })])
+  await r.advance(5000)
+  assert.deepEqual(page.of('notice'), [{ text: 'The session in katipon failed.' }])
+  assert.equal(r.says().length, 0)
+  assert.deepEqual(page.states(), [{ state: 'idle' }])
+})
+
+test('the first read of a run announces nothing', T, async () => {
+  const r = rig({ agents: [entry({ state: 'blocked', waitingFor: 'permission prompt' }), entry({ id: '0f3e9a11', state: 'blocked' })] })
+  await r.up()
+  const page = await r.connect()
+  await r.advance(5000)
+  assert.deepEqual(page.of('notice'), [])
+  assert.equal(r.says().length, 0)
+})
+
+test('an error is never spoken: a list that cannot be read is shown once', T, async () => {
+  const r = rig({ agents: 'manual' })
+  await r.up()
+  const page = await r.connect()
+  r.reads()[0].exit({ code: 1, stderr: "error: unknown option '--json'\n" })
+  await settle()
+  assert.deepEqual(page.of('error'), [{ message: "could not list sessions: claude agents failed (exit 1): error: unknown option '--json'" }])
+  assert.equal(r.says().length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "The list is read while a page is connected and sent when it changes" (the server's part)
+
+test('the list is read when the first page connects and every voiceSessionPollSeconds, and not when no page is connected', T, async () => {
+  const r = rig({ limits: { voiceCloseSeconds: 60 } })
+  await r.up()
+  assert.equal(r.reads().length, 0)
+  const page = await r.connect()
+  assert.equal(r.reads().length, 1)
+  await r.advance(5000)
+  assert.equal(r.reads().length, 2)
+  page.close()
+  await settle()
+  await r.advance(20_000)
+  assert.equal(r.reads().length, 2, 'no read with no page')
+  await r.connect()
+  assert.equal(r.reads().length, 3, 'a page connects again')
+})
+
+test('a second page does not start a second reading', T, async () => {
+  const r = rig({ agents: 'manual' })
+  await r.up()
+  await r.connect()
+  await r.connect()
+  assert.equal(r.reads().length, 1)
+  await r.advance(5000)
+  assert.equal(r.reads().length, 1, 'no second read while one is running')
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "The page can read a session's screen as text"
+
+const logUrl = (id = 'c7b0ada6') => `/log?t=${TOKEN}&id=${id}`
+
+test('the log of a listed session is claude logs with escape sequences and control characters removed', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = r.get(logUrl())
+  await settle()
+  assert.equal(r.logs().length, 1)
+  assert.deepEqual(r.logs()[0].args, ['logs', 'c7b0ada6'])
+  assert.equal(r.logs()[0].file, CLAUDE_PATH)
+  r.logs()[0].line('\u001b[1m\u001b[32m● Running tests\u001b[0m')
+  r.logs()[0].line('\u001b]0;title\u0007  12 passed')
+  r.logs()[0].exit({ code: 0 })
+  const res = await pending
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.json(), { ok: true, id: 'c7b0ada6', lines: ['● Running tests', '  12 passed'] })
+})
+
+test('only the last voiceLogLines lines are answered', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = r.get(logUrl())
+  await settle()
+  for (let i = 1; i <= 500; i++) r.logs()[0].line(`line ${i}`)
+  r.logs()[0].exit({ code: 0 })
+  const { lines } = (await pending).json()
+  assert.equal(lines.length, 200)
+  assert.equal(lines[0], 'line 301')
+  assert.equal(lines.at(-1), 'line 500')
+})
+
+test('a secret on the screen is redacted from the reply', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = r.get(logUrl())
+  await settle()
+  r.logs()[0].line('export GITHUB_TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ012345')
+  r.logs()[0].exit({ code: 0 })
+  const res = await pending
+  assert.equal(res.status, 200)
+  assert.equal(res.body().includes('ghp_0123456789abcdefghij'), false, res.body())
+})
+
+test('a session that is not listed, or no id, is 404 no such session and claude is not run', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  for (const url of [logUrl('ffffffff'), `/log?t=${TOKEN}`]) {
+    const res = await r.get(url)
+    assert.equal(res.status, 404, url)
+    assert.deepEqual(res.json(), { ok: false, reason: 'no such session' }, url)
+  }
+  assert.equal(r.logs().length, 0)
+})
+
+test('a log request without the token is 403 missing or wrong token and claude is not run', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const res = await r.get('/log?id=c7b0ada6')
+  assert.equal(res.status, 403)
+  assert.equal(res.json().reason, 'missing or wrong token')
+  assert.equal(r.logs().length, 0)
+})
+
+test('claude logs that fails is 502 with its first stderr line', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = r.get(logUrl())
+  await settle()
+  r.logs()[0].exit({ code: 1, stderr: 'No such session\n' })
+  const res = await pending
+  assert.equal(res.status, 502)
+  assert.deepEqual(res.json(), { ok: false, reason: 'claude logs failed (exit 1): No such session' })
+})
+
+test('the screen stays out of the conversation: no event, no write to the session, no say, and no other page sees it', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  const asking = await r.connect()
+  const other = await r.connect()
+  const eventsBefore = [asking.events().length, other.events().length]
+  const pending = r.get(logUrl())
+  await settle()
+  r.logs()[0].line('SCREEN-MARKER the owner\'s terminal shows this')
+  r.logs()[0].exit({ code: 0 })
+  const res = await pending
+  assert.ok(res.body().includes('SCREEN-MARKER'))
+  await settle()
+  assert.equal(asking.events().length, eventsBefore[0])
+  assert.equal(other.events().length, eventsBefore[1])
+  for (const page of [asking, other]) assert.equal(page.res.body().includes('SCREEN-MARKER'), false)
+  assert.deepEqual(r.claudes()[0].written, [])
+  assert.equal(r.says().length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "Stop ends a session through claude"
+
+const stopSession = (r, id = 'c7b0ada6') => r.post('/stop', { id })
+
+test('stop runs claude stop for a listed session, is 200 and reads the list at once', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const reads = r.reads().length
+  const pending = stopSession(r)
+  await settle()
+  assert.equal(r.stops().length, 1)
+  assert.equal(r.stops()[0].file, CLAUDE_PATH)
+  assert.deepEqual(r.stops()[0].args, ['stop', 'c7b0ada6'])
+  r.stops()[0].exit({ code: 0 })
+  const res = await pending
+  assert.equal(res.status, 200)
+  assert.deepEqual(res.json(), { ok: true })
+  await settle()
+  assert.equal(r.reads().length, reads + 1, 'no wait for the next interval')
+})
+
+test('stop of an id that is not listed is 409 no such session and claude is not run', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const res = await stopSession(r, 'ffffffff')
+  assert.equal(res.status, 409)
+  assert.deepEqual(res.json(), { ok: false, reason: 'no such session' })
+  assert.equal(r.stops().length, 0)
+})
+
+test('claude stop that fails is 502 with its first stderr line', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = stopSession(r)
+  await settle()
+  r.stops()[0].exit({ code: 1, stderr: 'already stopped\n' })
+  const res = await pending
+  assert.equal(res.status, 502)
+  assert.deepEqual(res.json(), { ok: false, reason: 'claude stop failed (exit 1): already stopped' })
+})
+
+test('a stop request without the token or the origin is refused and claude is not run', T, async () => {
+  const r = rig({ agents: [entry()] })
+  await r.up()
+  await r.connect()
+  assert.equal((await r.post('/stop', { id: 'c7b0ada6' }, { 'x-dial-token': undefined })).status, 403)
+  assert.equal((await r.post('/stop', { id: 'c7b0ada6' }, { origin: 'https://example.com' })).status, 403)
+  assert.equal(r.stops().length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "The Terminal control opens a session in a terminal window"
+
+const attachSession = (r, id = 'c7b0ada6') => r.post('/attach', { id })
+
+test('on macOS attach writes the command file and runs open once with its path', T, async () => {
+  const r = rig({ platform: 'darwin', noOpen: true, agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = attachSession(r)
+  await settle()
+  const file = `${TMP_DIR}/dial-attach-c7b0ada6.command`
+  assert.equal(r.writes.length, 1)
+  assert.equal(r.writes[0][0], file)
+  assert.equal(r.writes[0][1], `#!/bin/sh\nexec '${CLAUDE_PATH}' attach c7b0ada6\n`)
+  assert.equal(r.attaches().length, 1)
+  assert.deepEqual(r.attaches()[0].args, [file])
+  r.attaches()[0].exit({ code: 0 })
+  const res = await pending
+  assert.equal(res.status, 200)
+  assert.equal(res.json().ok, true)
+})
+
+test('on another platform attach is 409 run this in a terminal and writes and runs nothing', T, async () => {
+  const r = rig({ platform: 'linux', agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const res = await attachSession(r)
+  assert.equal(res.status, 409)
+  assert.deepEqual(res.json(), { ok: false, reason: 'run this in a terminal: claude attach c7b0ada6' })
+  assert.equal(r.writes.length, 0)
+  assert.equal(r.opens().length, 0)
+})
+
+test('attach of an id that is not listed is 409 no such session', T, async () => {
+  const r = rig({ platform: 'darwin', noOpen: true, agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const res = await attachSession(r, 'ffffffff')
+  assert.equal(res.status, 409)
+  assert.deepEqual(res.json(), { ok: false, reason: 'no such session' })
+  assert.equal(r.writes.length, 0)
+  assert.equal(r.attaches().length, 0)
+})
+
+test('an opener that fails is 502 could not open a terminal with its stderr line', T, async () => {
+  const r = rig({ platform: 'darwin', noOpen: true, agents: [entry()] })
+  await r.up()
+  await r.connect()
+  const pending = attachSession(r)
+  await settle()
+  r.attaches()[0].exit({ code: 1, stderr: 'The application cannot be opened\n' })
+  const res = await pending
+  assert.equal(res.status, 502)
+  assert.deepEqual(res.json(), { ok: false, reason: 'could not open a terminal: The application cannot be opened' })
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "The list is read while a page is connected" (scenario: The voice session was refused)
+
+test('a refused voice session still has its list read and sent, and Log, Stop and Terminal still answer', T, async () => {
+  const r = rig({ platform: 'darwin', noOpen: true, agents: [entry()] })
+  await r.voice.start()
+  await settle()
+  const page = await r.connect()
+  r.claudes()[0].line(report({ tools: ['Bash', 'Read'] }))
+  await settle()
+  assert.equal(page.states().at(-1).state, 'refused')
+  assert.equal(r.reads().length >= 1, true)
+  assert.deepEqual(page.of('sessions').at(-1).sessions.map(s => s.id), ['c7b0ada6'])
+
+  const log = r.get(logUrl())
+  await settle()
+  r.logs()[0].line('still readable')
+  r.logs()[0].exit({ code: 0 })
+  assert.deepEqual((await log).json().lines, ['still readable'])
+
+  const stop = stopSession(r)
+  await settle()
+  r.stops()[0].exit({ code: 0 })
+  assert.equal((await stop).status, 200)
+
+  const attach = attachSession(r)
+  await settle()
+  r.attaches()[0].exit({ code: 0 })
+  assert.equal((await attach).status, 200)
+})
+
+// ---------------------------------------------------------------------------
+// voice-sessions: "Every claude call is bounded and started sessions are left running"
+
+test('a read that hangs is ended after subprocessTimeoutSeconds and counts as failed', T, async () => {
+  const r = rig({ agents: 'manual' })
+  await r.up()
+  const page = await r.connect()
+  await r.advance(9_999)
+  assert.equal(r.reads()[0].killed, false)
+  await r.advance(1)
+  assert.equal(r.reads()[0].killed, true)
+  r.reads()[0].exit({ code: null, signal: 'SIGTERM' })
+  await settle()
+  assert.deepEqual(page.of('error'), [{ message: 'could not list sessions: claude agents did not answer in 10 seconds' }])
+})
+
+test('the command ends during a read: that process is ended and done waits until it has exited', T, async () => {
+  const r = rig({ agents: 'manual' })
+  await r.up()
+  await r.connect()
+  assert.equal(r.reads().length, 1)
+  const out = r.voice.shutdown()
+  await settle()
+  assert.equal(r.reads()[0].killed, true)
+  assert.equal(r.finished(), false, 'done must wait for the read to exit')
+  for (const child of r.children) if (child.killed && !child.exited) child.exit({ code: null, signal: 'SIGTERM' })
+  assert.equal(await withTimeout(out, 'shutdown'), 0)
+  assert.equal(r.finished(), true)
+})
+
+test('sessions outlive the window: claude stop is not run and no start is ended', T, async () => {
+  const running = [entry({ id: 'aaaaaaa1', state: 'working' }), entry({ id: 'aaaaaaa2', cwd: '/repos/dial', state: 'working' })]
+  const r = rig({ agents: running })
+  await r.up()
+  await r.connect()
+  const out = r.voice.shutdown()
+  await r.drain()
+  assert.equal(await withTimeout(out, 'shutdown'), 0)
+  assert.equal(r.stops().length, 0)
+  assert.equal(r.starts().length, 0)
+  assert.equal(r.finished(), true)
+})
+
+test('a start still running when the command ends is ended and the proposal is dropped', T, async () => {
+  const { r, id } = await drafted({ say: false })
+  await confirm(r, id)
+  const out = r.voice.shutdown()
+  await settle()
+  assert.equal(r.starts()[0].killed, true)
+  assert.equal(r.finished(), false)
+  await r.drain()
+  assert.equal(await withTimeout(out, 'shutdown'), 0)
+  assert.equal(r.stops().length, 0)
 })

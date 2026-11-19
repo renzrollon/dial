@@ -206,7 +206,9 @@ under `## Narrative` of `Projects/my-repo.md` and one `## Log` line in today's
 daily note. `scripts/add-repo.mjs` asks for that line after the first sync
 writes the notes. Run it from a terminal, outside a Claude Code session.
 
-You don't need to change or commit anything in the repo. Dial only reads it:
+You don't need to change or commit anything in the repo. Dial only reads it.
+A session you confirm in `dial voice` is your own Claude Code session, and it
+changes what you ask it to. Dial reads:
 
 | If the repo has... | Dial reads... |
 | --- | --- |
@@ -421,6 +423,8 @@ dial <command> [options]
   context [<repo>]             open pull requests with a ready verdict, items, Next and narrative, offline (--json)
   handoff <repo> [<change>] (--stdin | --text <t>) [--source <label>] [--next <text>]...
                                prepend a dated narrative entry to a note (--json)
+  capture --vault <name> (--stdin | --text <t>) [--dry-run]
+                               write a new note into a vault's Inbox (--json)
   narrate <repo> [<change>] --transcript <path> [--turns <n>] [--dry-run], or narrate --eval <dir>
                                ask a local model for the five narrative lines (--json)
   record --event SessionEnd|PreCompact
@@ -431,6 +435,9 @@ dial <command> [options]
   watch                        sync a repo whenever its ship or OpenSpec state moves
   voice [--port <n>] [--model <name>] [--say-voice <name>] [--lang <tag>] [--no-open]
                                talk to Dial in a window: it listens, answers aloud and runs until closed
+  propose <repo> --prompt <text>
+                               draft a Claude Code session for the dial voice window to confirm; starts nothing (--json)
+  sessions                     list the Claude Code sessions dial voice started (--json)
   report                       what the ledger shows over time (--json)
   review --week                write the weekly review of stale items into each vault (--json)
   help                         print this text (also --help after any command)
@@ -470,6 +477,10 @@ accept it, and then print one two-space-indented JSON document.
 - `handoff <repo> [<change>]` prepends a dated narrative entry to a note, from
   `--stdin` or `--text`, labelled by `--source`, and appends each `--next` as a
   `- [ ]` line.
+- `capture --vault <name> (--stdin | --text <t>)` writes one new note under
+  `Inbox/` in that vault, never over an existing one. The text is redacted for
+  secret shapes, not for personal prose. `--dry-run` prints the path and
+  writes nothing.
 - `narrate <repo> [<change>] --transcript <path>` asks a local model for five
   labelled lines (`Done:`, `Decided:`, `Next:`, `Blocked:`, `Open:`) from the
   last `--turns` turns and writes them as a narrative entry; `--dry-run` prints
@@ -495,14 +506,45 @@ accept it, and then print one two-space-indented JSON document.
   address with a token made new for each launch, and opens it in Chrome as an
   app window on macOS (`--no-open` skips that). Turns are answered by a Claude
   Code session (`--model`, default `sonnet`) that loads none of your Claude
-  Code setup and may run five commands only: `dial next`, `dial context`,
-  `dial brief`, `dial sync` and `dial repos`. Replies are shown sentence by
+  Code setup and may run eight commands only: `dial next`, `dial context`,
+  `dial brief`, `dial sync`, `dial repos`, `dial propose`, `dial sessions` and
+  `dial capture`.
+  It can draft a Claude Code session for one repo, which starts only when you
+  confirm it, by a click or by the word "confirm" after Dial has read it out;
+  the window lists the sessions it started with their state, their screen as
+  text, Stop and a Terminal control. You can ask Dial to take a note into a
+  vault and it reads back what it wrote; a spoken note reaches Claude as every
+  turn does before it is written. Replies are shown sentence by
   sentence and spoken with `say` (`--say-voice` picks the voice); without
   `say` they are only shown. Speech is recognized on the device in `--lang`
   (default `en-US`), or not at all, and typed turns always work. It ends on
   Quit, on SIGINT or SIGTERM, or `voiceCloseSeconds` after its last window
   closes, and exits 1 when the session was refused. It needs `claude` and
-  `dial` on `PATH` and takes no `--json`.
+  `dial` on `PATH` and takes no `--json`. The window shows a clockwork, and
+  goes full screen on Start. Escape, leaving full screen or a click on the
+  mechanism stops Dial. Nothing animates under the system's reduced-motion
+  setting. What each part shows:
+
+  | Part | Shows |
+  |---|---|
+  | Balance, lever, escape wheel | Dial can hear you now: one beat a second |
+  | Barrel | you are speaking: one notch per three words |
+  | Going train | Dial is thinking or speaking |
+  | Hand | sentences of the reply so far |
+  | Twelve sub-dials | one session each: working, blocked, done or failed |
+  | Reserve arc | time left on an open proposal |
+
+- `propose <repo> --prompt <text>` checks a repo (a name or a path inside it)
+  and a prompt and prints the proposal, as two lines or, with `--json`, as
+  `{ "proposal": { "repo", "prompt" } }`. It starts nothing and writes nothing:
+  a session starts only when the proposal is confirmed in the `dial voice`
+  window. A prompt that is blank, longer than `voiceTurnChars`, starts with
+  `-` or holds a control character other than a line feed or a tab is refused.
+- `sessions` runs `claude agents --json --all` once and prints the Claude Code
+  background sessions Dial named (`dial: ` and the start of the prompt),
+  newest first and capped at `voiceSessionRows`: id, repo, state, start time
+  and prompt. It writes nothing, not even the home, and needs `claude` on
+  `PATH`.
 
 ### Notes, anatomy
 
@@ -620,7 +662,7 @@ its host.
 | `staleDays` | 14 | days without activity before a change is stale |
 | `archivedKeepDays` | 30 | days an archived change stays on the board |
 | `briefLines` | 40 | maximum lines in a brief |
-| `subprocessTimeoutSeconds` | 10 | seconds before a git, gh, glab or interlock call is abandoned |
+| `subprocessTimeoutSeconds` | 10 | seconds before a git, gh, glab, interlock or claude session call is abandoned |
 | `remoteIntervalMinutes` | 30 | minutes a cached forge reply stays fresh |
 | `syncIntervalMinutes` | 15 | minutes between background syncs |
 | `narrateTurns` | 20 | most recent conversation turns sent to the local model |
@@ -633,6 +675,12 @@ its host.
 | `voiceTurnSeconds` | 120 | seconds before a voice turn is stopped |
 | `voiceCloseSeconds` | 10 | seconds dial voice stays up after its last window closes |
 | `voiceTurnChars` | 2000 | maximum characters in one voice turn |
+| `voiceSessions` | 3 | sessions dial voice may have running at once |
+| `voiceSessionPollSeconds` | 5 | seconds between reads of the session list |
+| `voiceSessionRows` | 12 | maximum sessions listed |
+| `voiceLogLines` | 200 | maximum lines of a session's screen shown |
+| `voiceProposalSeconds` | 120 | seconds before an unconfirmed proposal expires |
+| `captureChars` | 2000 | maximum characters in a captured note |
 
 An unknown cap name or a non-positive-integer value is refused, naming the key
 and the file.
@@ -732,6 +780,9 @@ prints the full report.
 - Dial does not move a repo between vaults. Unregister and register again.
 - Dial never deletes a note and never writes a diff, a file body or a secret.
 - Dial has no runtime dependencies; the only background process is the optional
-  LaunchAgent.
+  LaunchAgent. Sessions started from `dial voice` are Claude Code background
+  sessions, listed by `claude agents`, and keep running after the window closes.
+- Dial does not start a session unconfirmed, choose its permission mode, or answer its prompts.
+- Dial does not read or search notes it did not write.
 - `dial voice` is no daemon or app: it runs in the foreground, and needs
   `claude` and `dial` on `PATH`.

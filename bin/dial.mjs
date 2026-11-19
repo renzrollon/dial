@@ -4,11 +4,13 @@
  * stderr writer and the exit code; everything else is in `lib/`, which never
  * touches the process.
  */
-import { mkdirSync, readFileSync, realpathSync } from 'node:fs'
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { formatResult, install, status, uninstall } from '../lib/agent.mjs'
 import { brief, formatBrief, hookEnvelope } from '../lib/brief.mjs'
+import { capture } from '../lib/capture.mjs'
 import { context, formatContext } from '../lib/context.mjs'
 import { diagnose, formatDoctor, probeNarrate } from '../lib/doctor.mjs'
 import { ensureHome, HomeUnwritable, resolveHome } from '../lib/home.mjs'
@@ -16,16 +18,19 @@ import { effectiveLimits, formatLimits } from '../lib/limits.mjs'
 import { DEFAULT_SOURCE, handoff } from '../lib/handoff.mjs'
 import { evalSet, narrate } from '../lib/narrate.mjs'
 import { formatNext, nextItems } from '../lib/next.mjs'
+import { checkProposal, formatProposal } from '../lib/propose.mjs'
 import { BAD_EVENT, boundedExec, parsePayload, record, RECORD_EVENTS } from '../lib/record.mjs'
 import {
   expandHome, listRepos, loadRegistry, register, registryPath, repoName, resolveRepo, unregister, writeRegistry,
 } from '../lib/registry.mjs'
 import { formatReport, report, reviewWeek } from '../lib/report.mjs'
 import { findOnPath, spawnChild } from '../lib/spawn.mjs'
+import { exec } from '../lib/subprocess.mjs'
 import { syncAll, syncRepo } from '../lib/sync.mjs'
 import { dropNote, vaultInit } from '../lib/vault.mjs'
 import { newToken } from '../lib/voice/guard.mjs'
 import { createVoice, listenLoopback, loadVoiceFiles } from '../lib/voice/server.mjs'
+import { callReason, formatSessions, listSessions, parseAgents } from '../lib/voice/sessions.mjs'
 import { watch } from '../lib/watch.mjs'
 
 const USAGE = `dial — a ledger of every repo's changes in Obsidian, one vault per repo, the work/personal boundary kept sound
@@ -50,6 +55,8 @@ Commands:
                                offline (--json)
   handoff <repo> [<change>] (--stdin | --text <t>) [--source <label>] [--next <text>]...
                                prepend a dated narrative entry to a note (--json)
+  capture --vault <name> (--stdin | --text <t>) [--dry-run]
+                               write a new note into a vault's Inbox (--json)
   narrate <repo> [<change>] --transcript <path> [--turns <n>] [--dry-run], or narrate --eval <dir>
                                ask a local model for the five narrative lines (--json)
   record --event SessionEnd|PreCompact
@@ -60,6 +67,9 @@ Commands:
   watch                        sync a repo whenever its ship or OpenSpec state moves
   voice [--port <n>] [--model <name>] [--say-voice <name>] [--lang <tag>] [--no-open]
                                talk to Dial in a window: it listens, answers aloud and runs until closed
+  propose <repo> --prompt <text>
+                               draft a Claude Code session for the dial voice window to confirm; starts nothing (--json)
+  sessions                     list the Claude Code sessions dial voice started (--json)
   report                       what the ledger shows over time (--json)
   review --week                write the weekly review of stale items into each vault (--json)
   help                         print this text (also --help after any command)
@@ -85,6 +95,7 @@ const COMMANDS = {
   brief: { options: { hook: 'flag', session: 'value', json: 'flag' }, args: 1 },
   context: { options: { json: 'flag' }, args: 1 },
   handoff: { options: { stdin: 'flag', text: 'value', source: 'value', next: 'list', json: 'flag' }, args: 2 },
+  capture: { options: { vault: 'value', stdin: 'flag', text: 'value', 'dry-run': 'flag', json: 'flag' }, args: 0 },
   narrate: { options: { transcript: 'value', turns: 'value', 'dry-run': 'flag', eval: 'value', json: 'flag' }, args: 2 },
   record: { options: { event: 'value', json: 'flag' }, args: 0 },
   drop: { options: { json: 'flag' }, args: 2 },
@@ -97,6 +108,8 @@ const COMMANDS = {
   },
   watch: { options: {}, args: 0 },
   voice: { options: { port: 'value', model: 'value', 'say-voice': 'value', lang: 'value', 'no-open': 'flag' }, args: 0 },
+  propose: { options: { prompt: 'value', json: 'flag' }, args: 1 },
+  sessions: { options: { json: 'flag' }, args: 0 },
   report: { options: { json: 'flag' }, args: 0 },
   review: { options: { week: 'flag', json: 'flag' }, args: 0 },
   help: { options: {}, args: 0 },
@@ -463,11 +476,20 @@ async function runVoice({ options }, { env, out, err, home, signal, spawn, liste
   const files = loadVoiceFiles()
   if (!files.ok) throw new Refusal(files.reason)
 
+  // The registry as it is now, for a proposal's check and a session's repo; null when it cannot be read.
+  const readRegistry = () => {
+    try {
+      const loaded = loadRegistry(home)
+      return loaded.ok ? loaded.registry : null
+    } catch {
+      return null
+    }
+  }
   const voice = createVoice({
-    port, token: newToken(), lang, model, sayVoice,
-    limits: { voiceTurnSeconds: limits.voiceTurnSeconds, voiceCloseSeconds: limits.voiceCloseSeconds, voiceTurnChars: limits.voiceTurnChars },
+    port, token: newToken(), lang, model, sayVoice, limits,
     cwd, env, prompt: files.prompt, assets: files.assets, spawn, platform, noOpen,
     warn: line => err(`${line.startsWith('dial: ') ? line : `dial: ${line}`}\n`),
+    registry: readRegistry, claudePath: findOnPath(env, 'claude'), tmpdir: tmpdir(), writeFile: writeAttachFile,
   })
   const listener = await listen(voice.handle, { port })
   if (!listener.ok) {
@@ -493,6 +515,41 @@ async function runVoice({ options }, { env, out, err, home, signal, spawn, liste
     process.removeListener('SIGTERM', stop)
     await listener.close()
   }
+}
+
+/** Write the attach file with `mode`, also when it already exists (a mode given to a write applies only to a new file). */
+function writeAttachFile(path, text, { mode }) {
+  writeFileSync(path, text, { mode })
+  chmodSync(path, mode)
+}
+
+/** `propose`: check a repo and a prompt and print the proposal. Runs nothing and writes nothing. */
+function runPropose({ options, positionals }, { cwd, out, home }) {
+  const [arg] = positionals
+  if (arg === undefined) throw new Refusal('propose needs <repo>')
+  if (options.prompt === undefined) throw new Refusal('propose needs --prompt <text>')
+  const registry = loadOrRefuse(home)
+  const limits = limitsOrRefuse(registry, home)
+  const checked = checkProposal(registry, { repo: arg, prompt: options.prompt, cwd }, { maxChars: limits.voiceTurnChars })
+  if (!checked.ok) throw new Refusal(checked.reason)
+  out(options.json ? json({ proposal: checked.proposal }) : formatProposal(checked.proposal))
+  return 0
+}
+
+/** `sessions`: run `claude agents --json --all` once and print the sessions Dial named. Does not create the home. */
+function runSessions({ options }, { env, cwd, out, home }) {
+  const registry = loadOrRefuse(home)
+  const limits = limitsOrRefuse(registry, home)
+  const claude = findOnPath(env, 'claude')
+  if (claude === null) throw new Refusal('claude is not on PATH')
+  const seconds = limits.subprocessTimeoutSeconds
+  const result = exec(claude, ['agents', '--json', '--all'], { cwd, env, timeoutMs: seconds * 1000 })
+  if (!result.ok) throw new Refusal(callReason('agents', result, seconds))
+  const parsed = parseAgents(result.stdout)
+  if (!parsed.ok) throw new Refusal(parsed.reason)
+  const sessions = listSessions(parsed.entries, { repos: listRepos(registry), rows: limits.voiceSessionRows })
+  out(options.json ? json({ sessions }) : formatSessions(sessions))
+  return 0
 }
 
 async function dispatch(command, sub, spec, { options, positionals }, { env, cwd, out, err, readStdin, fetch, signal, started, spawn, listen, platform }) {
@@ -633,6 +690,22 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
       return 0
     }
 
+    case 'capture': {
+      if (options.vault === undefined || options.vault === '') throw new Refusal('capture needs --vault <name>')
+      if (!!options.stdin === (options.text !== undefined)) throw new Refusal('capture needs exactly one of --stdin or --text')
+      const text = options.stdin ? readStdin() : options.text
+      const registry = loadOrRefuse(home)
+      const limits = limitsOrRefuse(registry, home)
+      const result = capture({
+        registry, vault: options.vault, text, now: clockOf(env), maxChars: limits.captureChars, dryRun: !!options['dry-run'],
+        warn: line => err(`${line}\n`),
+      })
+      if (!result.ok) throw new Refusal(result.reason)
+      const { ok, ...fields } = result
+      out(options.json ? json(fields) : `${result.written ? 'created' : 'create'} ${result.path}\n`)
+      return 0
+    }
+
     case 'agent':
       return runAgent(sub, { options }, { env, out, home })
 
@@ -641,6 +714,12 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
 
     case 'voice':
       return runVoice({ options }, { env, out, err, home, signal, spawn, listen, platform })
+
+    case 'propose':
+      return runPropose({ options, positionals }, { cwd, out, home })
+
+    case 'sessions':
+      return runSessions({ options }, { env, cwd, out, home })
 
     case 'report': {
       const now = clockOf(env)
