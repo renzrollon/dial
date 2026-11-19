@@ -100,7 +100,9 @@ adds meaning through `dial handoff` (a narrative entry and `- [ ]` lines) and
 
 The Claude Code plugin closes the loop without a person running anything:
 `SessionStart` injects `dial brief --hook`; `SessionEnd` and `PreCompact` run
-`dial record`, which syncs and narrates when no handoff was written; a Bash
+`dial record`, which syncs, narrates when no handoff was written, and logs the
+outcome to `logs/record.jsonl` (`SessionEnd` starts it in the background and
+returns at once, and the next brief reports a session it missed); a Bash
 `PostToolUse` hook syncs after an Interlock or OpenSpec close event. Outside a
 session the LaunchAgent runs `dial sync --all --due-remote` every
 `syncIntervalMinutes`, and `dial watch` syncs a repo the moment its ship or

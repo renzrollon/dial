@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { ago, brief, capLines, formatBrief, hookEnvelope } from '../lib/brief.mjs'
@@ -198,4 +198,139 @@ test('brief writes nothing and spawns only git', () => {
   assert.deepEqual([snapshotTree(w.home), snapshotTree(w.vault)], before)
   assert.ok(w.exec.calls.length > 0)
   assert.ok(w.exec.calls.every(c => c.file === 'git'))
+})
+
+// --- the missed-session line (specs/next-and-brief, "brief prints a fixed sequence of lines for one repo") ---------
+
+const RECORD_LOG = w => join(w.home, 'logs', 'record.jsonl')
+const URL_MISS = 'http://127.0.0.1:11434/v1 unreachable'
+
+/** One record-log line as `dial record` writes it, `hours` before NOW; `extra` adds `unobserved`, `error` or `skipped`. */
+function recLine({ hours = 3, event = 'SessionEnd', repo = 'katipon', session = 's1', miss = true, ...extra } = {}) {
+  return JSON.stringify({ ts: hoursAgo(hours).toISOString(), event, repo, session, synced: true, narrated: false, miss, ...extra })
+}
+
+/** Write `lines` (strings, a trailing newline after each) as the record log, creating `logs/`. */
+function writeRecordLog(w, lines, { terminated = true } = {}) {
+  mkdirSync(join(w.home, 'logs'), { recursive: true })
+  writeFileSync(RECORD_LOG(w), lines.join('\n') + (terminated ? '\n' : ''))
+}
+
+/** `n` bytes or more of valid lines for another repo, newest-looking, to push earlier lines out of the window. */
+const padLines = (bytes, hours = 1) => {
+  const line = recLine({ hours, repo: 'other', session: 'p', miss: false })
+  return Array.from({ length: Math.ceil(bytes / (line.length + 1)) }, () => line)
+}
+
+const NOT_CAPTURED = reason => `last session not captured — ${reason} · 3h ago → dial doctor`
+const hasMissLine = lines => lines.some(l => l.startsWith('last session not captured'))
+
+test('a missed last session adds one line right after the header, before the change lines', () => {
+  const w = world()
+  writeRecordLog(w, [recLine({ unobserved: URL_MISS })])
+  const out = run(w)
+  assert.equal(out.ok, true)
+  assert.equal(out.lines[1], NOT_CAPTURED(URL_MISS))
+  assert.match(out.lines[2], /^spec-draft \[stale\] add-login — /)
+  assert.equal(out.lines.filter(l => l.startsWith('last session not captured')).length, 1)
+  assert.equal(out.lines.at(-1), 'dial next for everything else')
+})
+
+test('the reason is the error or the skip reason when there is no unobserved one', () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [recLine({ error: 'vault personal for katipon does not exist: /x' })])
+  assert.equal(run(w).lines[1], NOT_CAPTURED('vault personal for katipon does not exist: /x'))
+  writeRecordLog(w, [recLine({ skipped: 'no transcript_path or session_id in the payload', session: null })])
+  assert.equal(run(w).lines[1], NOT_CAPTURED('no transcript_path or session_id in the payload'))
+})
+
+test('the reason is one line cut to 120 characters', () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [recLine({ unobserved: `first\nsecond ${'x'.repeat(200)}` })])
+  const line = run(w).lines[1]
+  assert.equal(line, NOT_CAPTURED(`first second ${'x'.repeat(200)}`.slice(0, 120)))
+  assert.ok(!line.includes('\n'))
+})
+
+test('a captured session adds no line: the newest SessionEnd line is not a miss', () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [recLine({ hours: 5, miss: true, unobserved: URL_MISS }), recLine({ hours: 3, miss: false })])
+  assert.ok(!hasMissLine(run(w).lines))
+})
+
+test('other repos and PreCompact lines are ignored', () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [
+    recLine({ hours: 9, miss: false }),
+    recLine({ hours: 4, event: 'PreCompact', miss: true, unobserved: URL_MISS }),
+    recLine({ hours: 2, repo: 'other', miss: true, unobserved: URL_MISS }),
+  ])
+  assert.ok(!hasMissLine(run(w).lines))
+})
+
+test("the current session's own line is ignored, so a resumed session reports the one before it", () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [recLine({ hours: 6, session: 's1', miss: true, unobserved: URL_MISS }), recLine({ hours: 1, session: 's2', miss: false })])
+  const line = run(w, 'katipon', { session: 's2' }).lines[1]
+  assert.equal(line, `last session not captured — ${URL_MISS} · 6h ago → dial doctor`)
+  assert.ok(!hasMissLine(run(w).lines), 'without --session the newest line is s2, which was captured')
+})
+
+test('a missing, torn, unparsable-ts or unreadable log adds no line and the brief still prints', () => {
+  const w = world({ changes: {} })
+  assert.ok(!hasMissLine(run(w).lines), 'no log')
+  writeRecordLog(w, [recLine({ unobserved: URL_MISS }).slice(0, 60)], { terminated: false })
+  assert.ok(!hasMissLine(run(w).lines), 'a line cut off mid-JSON')
+  writeRecordLog(w, [recLine({ unobserved: URL_MISS }).replace(/"ts":"[^"]+"/, '"ts":"yesterday"')])
+  assert.ok(!hasMissLine(run(w).lines), 'ts does not parse')
+  rmSync(RECORD_LOG(w))
+  mkdirSync(RECORD_LOG(w))
+  const out = run(w)
+  assert.equal(out.ok, true)
+  assert.ok(!hasMissLine(out.lines), 'the log is a directory')
+  assert.equal(out.lines.at(-1), 'dial next for everything else')
+})
+
+test('an unusable line is skipped on its own, and the miss before it still counts', () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [recLine({ hours: 3, unobserved: URL_MISS }), 'not json at all', recLine({ hours: 1, miss: true }).slice(0, 50)], { terminated: false })
+  assert.equal(run(w).lines[1], NOT_CAPTURED(URL_MISS))
+})
+
+test('only the last 64 KiB of the log is read', () => {
+  const w = world({ changes: {} })
+  writeRecordLog(w, [recLine({ hours: 3, unobserved: URL_MISS }), ...padLines(65 * 1024 + 1)])
+  assert.ok(!hasMissLine(run(w).lines), 'a line more than 64 KiB before the end is not seen')
+
+  writeRecordLog(w, [...padLines(300 * 1024, 20), recLine({ hours: 3, unobserved: URL_MISS }), ...padLines(2 * 1024)])
+  assert.equal(run(w).lines[1], NOT_CAPTURED(URL_MISS), 'a line inside the window of a large log is seen')
+})
+
+test('the missed-session line is dropped last: after the change lines, before the header', () => {
+  const w = world({ changes: { 'add-login': { tasks: { done: 1, total: 5 } }, 'fix-nav': { tasks: { done: 1, total: 5 } } } })
+  writeRecordLog(w, [recLine({ unobserved: URL_MISS })])
+  const full = run(w)
+  assert.equal(full.lines.length, 5, full.lines.join('\n'))
+  assert.equal(full.lines[1], NOT_CAPTURED(URL_MISS))
+
+  const three = run(w, 'katipon', { limits: { briefLines: 3 } })
+  assert.deepEqual(three.lines, [full.lines[0], NOT_CAPTURED(URL_MISS), '… 2 more lines, see Projects/katipon.md'])
+  assert.equal(three.dropped, 2)
+
+  const two = run(w, 'katipon', { limits: { briefLines: 2 } })
+  assert.deepEqual(two.lines, [full.lines[0], '… 3 more lines, see Projects/katipon.md'])
+})
+
+test('the record log is only read: a brief over a log with a miss writes nothing and creates no home', () => {
+  const w = world()
+  writeRecordLog(w, [recLine({ unobserved: URL_MISS })])
+  const before = [snapshotTree(w.home), snapshotTree(w.vault)]
+  run(w)
+  assert.deepEqual([snapshotTree(w.home), snapshotTree(w.vault)], before)
+  assert.ok(w.exec.calls.every(c => c.file === 'git'))
+
+  const gone = join(tmp('brief-nohome-'), 'dial')
+  const out = run(w, 'katipon', { home: gone })
+  assert.equal(out.ok, true)
+  assert.equal(existsSync(gone), false)
 })

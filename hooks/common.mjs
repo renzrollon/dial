@@ -1,10 +1,12 @@
 /**
  * Shared body of the three hook scripts (specs/claude-plugin). A hook never blocks a session: one top-level
  * guard, exit 0 on every path, and a failure is the single stderr line `dial <hook> hook error (ignored): <message>`.
- * The repo is resolved in-process before any subprocess; the CLI run is the plugin's own `bin/dial.mjs`.
+ * The repo is resolved in-process before any subprocess; the CLI run is the plugin's own `bin/dial.mjs`. A hook
+ * either waits for that run or, when its plan says `detach`, starts it and leaves it running: Claude Code gives
+ * SessionEnd hooks a shared budget of about 1.5 seconds, which a plugin's own timeout does not raise.
  */
-import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { spawn, spawnSync } from 'node:child_process'
+import { closeSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveHome } from '../lib/home.mjs'
@@ -30,9 +32,49 @@ function oneLine(text) {
   return String(text ?? '').replace(/\s*\n\s*/g, ' ').trim()
 }
 
+/** The hook's one failure line; a closed stderr must not change the exit code. */
+function report(name, error) {
+  try {
+    process.stderr.write(`dial ${name} hook error (ignored): ${oneLine(error && error.message ? error.message : error)}\n`)
+  } catch {
+    // nothing left to tell
+  }
+}
+
 /**
- * Run one hook. `plan({ payload, entry })` returns `{ args, stdin?, relay? }` or null for nothing to do;
- * `relay` is false except for SessionStart. `gate(payload)` may return false before the registry is read.
+ * Start the CLI in its own session with `input` on its stdin, and return without waiting. It holds none of the hook's
+ * stdio: stdout is discarded and stderr appends to `<home>/logs/<name>.err.log`, or is discarded when that cannot be
+ * opened. `logs/` is made without `recursive`, so a missing home stays missing.
+ */
+function startDetached(name, argv, input) {
+  const logs = join(resolveHome(process.env), 'logs')
+  try {
+    mkdirSync(logs)
+  } catch {
+    // it exists, or the open below fails
+  }
+  let stderr = 'ignore'
+  try {
+    stderr = openSync(join(logs, `${name}.err.log`), 'a')
+  } catch {
+    // the run's outcome log still records the result
+  }
+  try {
+    const child = spawn(process.execPath, argv, { detached: true, stdio: ['pipe', 'ignore', stderr] })
+    child.on('error', error => report(name, error))
+    // A child that fails to start has no stdin, or one that breaks on the write.
+    child.stdin?.on('error', () => {})
+    child.stdin?.end(input)
+    child.unref()
+  } finally {
+    if (stderr !== 'ignore') closeSync(stderr)
+  }
+}
+
+/**
+ * Run one hook. `plan({ payload, entry })` returns `{ args, stdin?, relay?, detach? }` or null for nothing to do;
+ * `relay` is false except for SessionStart, and `detach` starts the CLI without waiting for it (nothing is relayed and
+ * `timeoutMs` does not apply). `gate(payload)` may return false before the registry is read.
  * `deadlineMs`, when given, is passed to the CLI as `DIAL_DEADLINE_MS`, below `timeoutMs`, so every subprocess
  * the CLI runs ends (and its writes start) before this hook's kill can land on it.
  */
@@ -47,8 +89,14 @@ export function runHook(name, { gate = () => true, plan, timeoutMs, deadlineMs }
     if (!entry) return
     const step = plan({ payload, entry })
     if (!step) return
-    const result = spawnSync(process.execPath, [join(PLUGIN_ROOT, 'bin', 'dial.mjs'), ...step.args], {
-      input: step.stdin === 'payload' ? raw : '',
+    const argv = [join(PLUGIN_ROOT, 'bin', 'dial.mjs'), ...step.args]
+    const input = step.stdin === 'payload' ? raw : ''
+    if (step.detach) {
+      startDetached(name, argv, input)
+      return
+    }
+    const result = spawnSync(process.execPath, argv, {
+      input,
       encoding: 'utf8',
       timeout: timeoutMs,
       env: Number.isInteger(deadlineMs) ? { ...process.env, DIAL_DEADLINE_MS: String(deadlineMs) } : process.env,
@@ -70,17 +118,13 @@ export function runHook(name, { gate = () => true, plan, timeoutMs, deadlineMs }
       if (envelope && typeof envelope === 'object' && envelope.hookSpecificOutput) process.stdout.write(`${text}\n`)
     }
   } catch (error) {
-    try {
-      process.stderr.write(`dial ${name} hook error (ignored): ${oneLine(error && error.message ? error.message : error)}\n`)
-    } catch {
-      // a closed stderr must not change the exit code
-    }
+    report(name, error)
   }
 }
 
 /**
- * Exit 0 whatever happened. Only the exit code is set: every hook path is synchronous, so the process ends
- * when the event loop drains, after piped stdout (asynchronous on darwin) has been flushed. `process.exit`
+ * Exit 0 whatever happened. Only the exit code is set: the process ends when the event loop drains, after piped
+ * stdout (asynchronous on darwin) and a detached child's stdin have been flushed. `process.exit`
  * here would cut a large SessionStart envelope at the pipe buffer.
  */
 export function finish() {

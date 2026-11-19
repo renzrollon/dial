@@ -291,7 +291,8 @@ every vault and the Dial home to `~/.claude/settings.json`:
 turn should carry a `dial brief`. Run `/dial:next` to see the drafted actions,
 `/dial:ask` with a question about your pull requests,
 and `/dial:handoff` before you stop. When the session ends, the `SessionEnd`
-hook syncs, and if no handoff was written it narrates (step 6).
+hook hands off to `dial record` and returns at once. The run continues in the
+background: it syncs, and if no handoff was written it narrates (step 6).
 
 ### 5. Optional: background sync
 
@@ -343,10 +344,12 @@ glab auth login        # GitLab repos
 dial sync my-repo --remote
 ```
 
-Without `--remote` or `--due-remote`, Dial makes no network calls, with one
-exception: the Claude Code session of `dial voice` reaches Anthropic as your
-own Claude Code does, through your login and against your plan. Its listener
-is loopback only, and your speech audio stays on the machine. PR and CI
+Without `--remote` or `--due-remote`, Dial makes no network calls, with two
+exceptions. `dial doctor` tries a connection to the narrate endpoints on
+loopback addresses, sending no data. The Claude Code session of `dial voice`
+reaches Anthropic as your own Claude Code does, through your login and against
+your plan. Its listener is loopback only, and your speech audio stays on the
+machine. PR and CI
 fields show the cached reply, or `unobserved` when there is none. The
 LaunchAgent uses `--due-remote`, so it refreshes at most every
 `remoteIntervalMinutes` (30).
@@ -359,8 +362,8 @@ dial doctor
 
 A complete setup prints `DIAL OK`. Every row is `ok`, except `launch-agent`,
 which is `skip` if you didn't install it, and `narrate-endpoint`, which is
-`skip` if no model is configured. Then open `Dial.base` and `Dial Summary.md`
-in Obsidian.
+`skip` if no model is configured and `warn` if no model is listening. Then open
+`Dial.base` and `Dial Summary.md` in Obsidian.
 
 | Doctor row | Fix |
 | --- | --- |
@@ -370,6 +373,7 @@ in Obsidian.
 | `permissions` warn, not allowed | step 4b |
 | `vault-scaffold` warn | `dial vault init <name>` |
 | `vault-nesting` warn | move one vault out of the other |
+| `narrate-endpoint` warn | start the local model server; until then, sessions end without a narrative |
 | `on-path` warn | `npm i -g .` in the checkout (again after a Node switch) |
 | `launch-agent` `paths-missing` | `dial agent install` again |
 
@@ -472,7 +476,9 @@ accept it, and then print one two-space-indented JSON document.
   the prompt, the endpoints and the turns and calls nothing. `narrate --eval
   <dir>` runs the quality set under `<dir>/items/`.
 - `record --event SessionEnd|PreCompact` is the hook side: sync, then narrate
-  when no handoff was written. It exits 0 on every path.
+  when no handoff was written. It exits 0 on every path. Each run for a
+  registered repo appends one line to `logs/record.jsonl`, and `dial brief`
+  shows `last session not captured` when that line marks the session as missed.
 - `drop <repo> <change>` marks a change note `dropped: YYYY-MM-DD`.
 - `report` prints the indicators read from the vault notes, the sync log and
   the daily log, each with its denominator or `unobserved: <reason>`; it writes
@@ -557,7 +563,8 @@ Local dates and times follow the process time zone (`TZ`).
 $DIAL_HOME/
   registry.json       the registry; absent until the first write
   cache/remote/       <repo>.json, the last PR and CI reply per repo
-  logs/               sync.jsonl, one line per synced repo; agent.out.log and agent.err.log
+  logs/               sync.jsonl, one line per synced repo; record.jsonl, one line per record run;
+                      record.err.log, stderr of background record runs; agent.out.log and agent.err.log
   eval/               items/, outputs/, labels.jsonl: the narrate quality set, made by hand
   voice/              the working directory of the dial voice session; Dial writes no file in it
 ```
@@ -644,7 +651,7 @@ unregistered repo, runs the plugin's own CLI, and never blocks a session.
 | Event | Hook | Effect |
 | --- | --- | --- |
 | `SessionStart` | `hooks/brief.mjs` | injects `dial brief --hook` |
-| `SessionEnd`, `PreCompact` | `hooks/record.mjs` | `dial record --event ...`: sync, then narrate when no handoff was written |
+| `SessionEnd`, `PreCompact` | `hooks/record.mjs` | `dial record --event ...`: sync, then narrate when no handoff was written. `SessionEnd` starts it detached and returns at once; `PreCompact` waits for it |
 | `PostToolUse` (Bash) | `hooks/sync-on-event.mjs` | syncs after an Interlock or OpenSpec close event |
 
 Skills: `/dial:handoff [<repo>] [<change>]` writes five lines of the session
@@ -707,7 +714,9 @@ The last six never fail:
    warns with `dial vault init <name>` otherwise.
 8. `vault-nesting`: warns when one registered vault lies inside another.
 9. `narrate-endpoint`: the resolved endpoint and model, read from files with no
-   network call and no key printed; skip when none is configured.
+   key printed; skip when none is configured. It tries a connection of at most
+   1 second to the primary and fallback on loopback addresses, sending no data,
+   and warns when neither accepts.
 10. `launch-agent`: the LaunchAgent status; skip when not installed.
 11. `on-path`: warns with `npm i -g .` when `dial` is not on `PATH`.
 12. `fields`: always ok; its `--json` evidence lists every frontmatter key Dial

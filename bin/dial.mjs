@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url'
 import { formatResult, install, status, uninstall } from '../lib/agent.mjs'
 import { brief, formatBrief, hookEnvelope } from '../lib/brief.mjs'
 import { context, formatContext } from '../lib/context.mjs'
-import { diagnose, formatDoctor } from '../lib/doctor.mjs'
+import { diagnose, formatDoctor, probeNarrate } from '../lib/doctor.mjs'
 import { ensureHome, HomeUnwritable, resolveHome } from '../lib/home.mjs'
 import { effectiveLimits, formatLimits } from '../lib/limits.mjs'
 import { DEFAULT_SOURCE, handoff } from '../lib/handoff.mjs'
@@ -523,7 +523,8 @@ async function dispatch(command, sub, spec, { options, positionals }, { env, cwd
     }
 
     case 'doctor': {
-      const report = diagnose({ env, cwd })
+      const listening = await probeNarrate({ env })
+      const report = diagnose({ env, cwd, listening })
       out(options.json ? json(report) : formatDoctor(report))
       return report.ok ? 0 : 1
     }

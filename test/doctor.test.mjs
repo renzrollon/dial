@@ -13,8 +13,9 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { plist } from '../lib/agent.mjs'
+import * as doctorModule from '../lib/doctor.mjs'
 import { diagnose, formatDoctor } from '../lib/doctor.mjs'
-import { FIXTURES, fakeBinary, makeGitDir, makeHome, makeVault, readJson, snapshotTree, tmp, writeJson } from './helpers.mjs'
+import { FIXTURES, fakeBinary, makeGitDir, makeHome, makeVault, readJson, runCli, snapshotTree, tmp, writeJson } from './helpers.mjs'
 
 const STATUSES = ['ok', 'warn', 'fail', 'skip']
 const IDS = [
@@ -797,4 +798,170 @@ test('boundary: a repo entry under another vault\'s root fails naming path, root
   reg.roots = { [join(w.root, 'repos')]: 'personal' }
   writeJson(w.registryFile, reg)
   assert.equal(byId(await run(w), 'boundary').status, 'ok')
+})
+
+// ------------------------------------------------- narrate-endpoint: is anything listening
+// (specs/doctor, "The narrate-endpoint check reports the resolved endpoint and whether anything is listening")
+//
+// The probe is `probeNarrate({ env, connect })`, an async function that never rejects and resolves what
+// `diagnose({ ..., listening })` takes. `connect({ host, port })` is the injectable TCP attempt: it resolves when
+// the connection is accepted and rejects when it is refused. These tests treat the resolved value as opaque and
+// read only the report, so the shape of `listening` is the implementation's to choose. A real attempt is
+// bounded by 1 second, which the hanging case pins with a `connect` that never settles.
+
+/** A `connect` stand-in: `answers` maps a port to 'accept' (default 'refuse') or 'hang'; every call is on `.calls`. */
+function fakeConnect(answers = {}) {
+  const connect = ({ host, port }) => {
+    connect.calls.push({ host, port: Number(port) })
+    const answer = answers[Number(port)] ?? 'refuse'
+    if (answer === 'accept') return Promise.resolve()
+    if (answer === 'hang') return new Promise(() => {})
+    return Promise.reject(Object.assign(new Error(`connect ECONNREFUSED ${host}:${port}`), { code: 'ECONNREFUSED' }))
+  }
+  connect.calls = []
+  return connect
+}
+
+/** The report of a run that probed first, as `dial doctor` does. */
+async function probed(w, connect, overrides = {}) {
+  const listening = await doctorModule.probeNarrate({ env: w.env, connect })
+  return run(w, { listening, ...overrides })
+}
+
+test('narrate-endpoint listening: ok with the same detail, both addresses tried, no key printed', async () => {
+  const w = world()
+  const connect = fakeConnect({ 8000: 'accept', 11434: 'accept' })
+  const report = await probed(w, connect)
+  const c = byId(report, 'narrate-endpoint')
+  assert.equal(c.status, 'ok')
+  assert.equal(c.detail, 'http://127.0.0.1:8000/v1 (mtplx-qwen38-27b-optimized-speed)')
+  assert.deepEqual(connect.calls.map(x => [x.host, x.port]).sort((a, b) => a[1] - b[1]), [['127.0.0.1', 8000], ['127.0.0.1', 11434]])
+  assert.ok(!JSON.stringify(report).includes('sk-local-123'))
+  assert.ok(!text(report).includes('sk-local-123'))
+  assert.equal(report.ok, true)
+  assert.equal(report.counts.warn, 0)
+})
+
+test('narrate-endpoint listening: the registry override is the address that is tried and named', async () => {
+  const w = world()
+  const reg = readJson(w.registryFile)
+  reg.narrate = { url: 'http://127.0.0.1:9000/v1', model: 'qwen3.6' }
+  writeJson(w.registryFile, reg)
+  const connect = fakeConnect({ 9000: 'accept' })
+  const c = byId(await probed(w, connect), 'narrate-endpoint')
+  assert.equal(c.status, 'ok')
+  assert.equal(c.detail, 'http://127.0.0.1:9000/v1 (qwen3.6)')
+  assert.ok(connect.calls.some(x => x.port === 9000))
+  assert.ok(!connect.calls.some(x => x.port === 8000), 'the pi address is not the resolved one')
+})
+
+test('narrate-endpoint nothing configured: skip, and doctor opens no connection', async () => {
+  const w = world({ narrate: false })
+  const connect = fakeConnect({ 11434: 'accept' })
+  const c = byId(await probed(w, connect), 'narrate-endpoint')
+  assert.equal(c.status, 'skip')
+  assert.equal(c.detail, 'no narrate endpoint configured')
+  assert.deepEqual(connect.calls, [])
+})
+
+test('narrate-endpoint nothing listening: a warning that names each address, says how to fix it and leaves the exit code alone', async () => {
+  const w = world()
+  const connect = fakeConnect()
+  const report = await probed(w, connect)
+  const c = byId(report, 'narrate-endpoint')
+  assert.equal(c.status, 'warn')
+  assert.equal(c.detail, 'http://127.0.0.1:8000/v1 (mtplx-qwen38-27b-optimized-speed): nothing is listening')
+  assert.ok(c.evidence.some(e => e.includes('http://127.0.0.1:8000/v1') && e.includes('not listening')), c.evidence.join('|'))
+  assert.ok(c.evidence.some(e => e.includes('http://127.0.0.1:11434/v1') && e.includes('not listening')), c.evidence.join('|'))
+  assert.match(c.fix, /start the local model server/i)
+  assert.equal(report.ok, true)
+  assert.equal(report.counts.warn, 1)
+  assert.deepEqual(report.warnings, ['narrate-endpoint'])
+  assert.deepEqual(report.failures, [])
+  assert.ok(!JSON.stringify(report).includes('sk-local-123'))
+  const printed = text(report)
+  assert.match(printed, /\[warn\] narrate-endpoint: .*: nothing is listening/)
+  assert.match(printed, /fix: .*start the local model server/i)
+  assert.ok(printed.startsWith('DIAL OK — '), printed)
+})
+
+test('narrate-endpoint only the fallback listening: ok, with the primary not listening and the fallback listening', async () => {
+  const w = world()
+  const c = byId(await probed(w, fakeConnect({ 11434: 'accept' })), 'narrate-endpoint')
+  assert.equal(c.status, 'ok')
+  assert.equal(c.detail, 'http://127.0.0.1:8000/v1 (mtplx-qwen38-27b-optimized-speed)')
+  assert.ok(c.evidence.some(e => e.includes('http://127.0.0.1:8000/v1') && e.includes('not listening')), c.evidence.join('|'))
+  assert.ok(c.evidence.some(e => e.includes('http://127.0.0.1:11434/v1') && /listening/.test(e) && !/not listening/.test(e)), c.evidence.join('|'))
+})
+
+test('narrate-endpoint a non-local endpoint is not contacted, is named as not local, and is a warning when the fallback refuses', async () => {
+  const w = world()
+  const reg = readJson(w.registryFile)
+  reg.narrate = { url: 'https://models.example.com/v1', model: 'big-model' }
+  writeJson(w.registryFile, reg)
+  const connect = fakeConnect()
+  const c = byId(await probed(w, connect), 'narrate-endpoint')
+  assert.ok(!connect.calls.some(x => String(x.host).includes('example.com')), JSON.stringify(connect.calls))
+  assert.ok(connect.calls.every(x => ['127.0.0.1', 'localhost', '::1', '[::1]'].includes(x.host)), JSON.stringify(connect.calls))
+  assert.equal(c.status, 'warn')
+  assert.ok(c.evidence.some(e => e.includes('models.example.com') && e.includes('not a local endpoint')), c.evidence.join('|'))
+  assert.ok(c.evidence.some(e => e.includes('11434') && e.includes('not listening')), c.evidence.join('|'))
+})
+
+test('narrate-endpoint a hanging address ends after about a second and counts as not listening', async () => {
+  const w = world()
+  const started = Date.now()
+  const report = await probed(w, fakeConnect({ 8000: 'hang', 11434: 'hang' }))
+  const ms = Date.now() - started
+  assert.ok(ms >= 900 && ms < 3_000, `the probe took ${ms}ms`)
+  const c = byId(report, 'narrate-endpoint')
+  assert.equal(c.status, 'warn')
+  assert.match(c.detail, /: nothing is listening$/)
+})
+
+test('narrate-endpoint a probe that fails never rejects and leaves the report whole, as it is without a probe', async () => {
+  const w = world()
+  const bare = await run(w)
+  const hostile = new Proxy({}, { get() { throw new Error('env exploded') } })
+  const afterResolve = await doctorModule.probeNarrate({ env: hostile, connect: fakeConnect({ 8000: 'accept' }) })
+  const afterConnect = await doctorModule.probeNarrate({
+    env: w.env,
+    connect: () => {
+      throw new Error('socket exploded')
+    },
+  })
+  for (const listening of [afterResolve, afterConnect]) {
+    const report = await run(w, { listening })
+    assert.deepEqual(report.checks.map(c => c.id), IDS)
+    assert.equal(report.ok, true)
+    assert.equal(byId(report, 'narrate-endpoint').status === 'fail', false)
+  }
+  const resolved = await run(w, { listening: afterResolve })
+  assert.deepEqual(byId(resolved, 'narrate-endpoint'), byId(bare, 'narrate-endpoint'))
+  assert.deepEqual(resolved.counts, bare.counts)
+})
+
+test('narrate-endpoint a probe with a missing home leaves the home missing', async () => {
+  const home = join(tmp('dial-nohome-'), 'dial')
+  const w = world({ registry: false, home })
+  const connect = fakeConnect({ 8000: 'accept' })
+  const report = await probed(w, connect)
+  assert.ok(connect.calls.length > 0, 'the pi models file still resolves an endpoint')
+  assert.equal(byId(report, 'narrate-endpoint').status, 'ok')
+  assert.equal(existsSync(home), false)
+})
+
+test('dial doctor probes before it reports: nothing listening is a warning in the text and in --json', async () => {
+  const w = world()
+  const reg = readJson(w.registryFile)
+  // Nothing listens on port 1, whatever runs on the machine that runs the tests.
+  reg.narrate = { url: 'http://127.0.0.1:1/v1', model: 'm', fallbackUrl: 'http://127.0.0.1:1/v1' }
+  writeJson(w.registryFile, reg)
+  const env = { DIAL_HOME: w.home, HOME: w.userHome, DIAL_LAUNCHCTL_BIN: join(w.root, 'bin', 'launchctl') }
+  const printed = await runCli(['doctor'], env)
+  assert.match(printed.stdout, /\[warn\] narrate-endpoint: http:\/\/127\.0\.0\.1:1\/v1 \(m\): nothing is listening/)
+  const json = await runCli(['doctor', '--json'], env)
+  const c = JSON.parse(json.stdout).checks.find(x => x.id === 'narrate-endpoint')
+  assert.equal(c.status, 'warn')
+  assert.equal(c.detail, 'http://127.0.0.1:1/v1 (m): nothing is listening')
 })
