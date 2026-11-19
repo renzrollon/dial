@@ -14,8 +14,12 @@ import { makeHome, makeRepo, makeVault, snapshotTree, tmp } from './helpers.mjs'
 const REAL_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const ENVELOPE = '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"brief text"}}'
 
-/** A plugin root with the real hooks and lib and a fake CLI that appends `{argv, stdin}` to `calls.jsonl`. */
-function fakePlugin({ exit = 0, stderr = '', stdout = '' } = {}) {
+/**
+ * A plugin root with the real hooks and lib and a fake CLI that appends `{argv, stdin}` to `calls.jsonl`.
+ * `delayMs` makes the CLI read its whole stdin, wait, and only then append its call, so a hook that does not
+ * wait for it leaves the call to appear later.
+ */
+function fakePlugin({ exit = 0, stderr = '', stdout = '', delayMs = 0 } = {}) {
   const root = tmp('plugin-')
   cpSync(join(REAL_ROOT, 'hooks'), join(root, 'hooks'), { recursive: true })
   symlinkSync(join(REAL_ROOT, 'lib'), join(root, 'lib'))
@@ -25,6 +29,7 @@ function fakePlugin({ exit = 0, stderr = '', stdout = '' } = {}) {
 import { appendFileSync, readFileSync } from 'node:fs'
 let stdin = ''
 try { stdin = readFileSync(0, 'utf8') } catch {}
+${delayMs > 0 ? `await new Promise(resolve => setTimeout(resolve, ${delayMs}))` : ''}
 appendFileSync(${JSON.stringify(calls)}, JSON.stringify({ argv: process.argv.slice(2), stdin }) + '\\n')
 process.stderr.write(${JSON.stringify(stderr)})
 process.stdout.write(${JSON.stringify(stdout)})
@@ -49,6 +54,24 @@ function run(root, script, args, { stdin = '', cwd, env = {} } = {}) {
     child.stdin.on('error', () => {})
     child.stdin.end(stdin)
   })
+}
+
+/** Poll `read` every 50 ms until it returns something truthy, or fail after `timeoutMs`. */
+async function until(read, what, timeoutMs = 10_000) {
+  const stop = Date.now() + timeoutMs
+  for (;;) {
+    const value = read()
+    if (value) return value
+    if (Date.now() > stop) assert.fail(`timed out after ${timeoutMs}ms waiting for ${what}`)
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+}
+
+/** Run a hook and report how long it took to close, with its result. */
+async function timed(root, script, args, options) {
+  const started = Date.now()
+  const result = await run(root, script, args, options)
+  return { ...result, ms: Date.now() - started }
 }
 
 /** A vault, a registered repo `katipon` and its home. */
@@ -133,6 +156,8 @@ test('record: forwards the payload unchanged on stdin with the event', async () 
   const p = fakePlugin()
   const text = payload(w, { reason: 'exit', transcript_path: '/t.jsonl' })
   const end = await run(p.root, 'record.mjs', ['--event', 'SessionEnd'], { stdin: text, env: w.env })
+  // SessionEnd is detached, so its call lands after the hook has gone.
+  await until(() => p.readCalls().length === 1, 'the detached SessionEnd call')
   const pre = await run(p.root, 'record.mjs', ['--event', 'PreCompact'], { stdin: payload(w, { trigger: 'auto' }), env: w.env })
   assert.deepEqual([end.code, end.stdout, end.stderr], [0, '', ''])
   assert.deepEqual([pre.code, pre.stdout], [0, ''])
@@ -142,10 +167,11 @@ test('record: forwards the payload unchanged on stdin with the event', async () 
   assert.equal(JSON.parse(calls[1].stdin).trigger, 'auto')
 })
 
+// Pins "Hooks never block a session": only a hook that waits can see its CLI fail, which PreCompact does.
 test('record: a failing CLI is one stderr line and exit 0', async () => {
   const w = world()
   const p = fakePlugin({ exit: 1, stderr: 'dial: boom\n' })
-  const r = await run(p.root, 'record.mjs', ['--event', 'SessionEnd'], { stdin: payload(w), env: w.env })
+  const r = await run(p.root, 'record.mjs', ['--event', 'PreCompact'], { stdin: payload(w), env: w.env })
   assert.deepEqual([r.code, r.stdout, r.stderr], [0, '', 'dial record hook error (ignored): dial: boom\n'])
 })
 
@@ -228,4 +254,78 @@ test('real CLI: a repo registered under a symlinked directory, hook started in t
   assert.equal(r.code, 0)
   assert.equal(r.stderr, '')
   assert.equal(JSON.parse(r.stdout).hookSpecificOutput.hookEventName, 'SessionStart')
+})
+
+// --- SessionEnd is detached, PreCompact waits (specs/claude-plugin, "SessionEnd and PreCompact record the session") ---
+
+const SLOW_MS = 3_000
+
+test('record: SessionEnd returns within a second with stdout and stderr closed while the CLI takes 3 seconds, and the CLI still gets the whole payload', async () => {
+  const w = world()
+  const p = fakePlugin({ delayMs: SLOW_MS })
+  const text = payload(w, { reason: 'exit', transcript_path: '/t.jsonl' })
+  const r = await timed(p.root, 'record.mjs', ['--event', 'SessionEnd'], { stdin: text, env: w.env })
+  assert.deepEqual([r.code, r.stdout, r.stderr], [0, '', ''])
+  assert.ok(r.ms < 1_000, `the hook took ${r.ms}ms, so it waited for the record run`)
+  assert.deepEqual(p.readCalls(), [], 'the CLI is still working when the hook has gone')
+  const calls = await until(() => (p.readCalls().length ? p.readCalls() : null), 'the detached CLI to finish')
+  assert.deepEqual(calls, [{ argv: ['record', '--event', 'SessionEnd'], stdin: text }])
+})
+
+test('record: SessionEnd hands a 5 KB payload over whole after the hook has gone', async () => {
+  const w = world()
+  const p = fakePlugin({ delayMs: 500 })
+  const text = payload(w, { reason: 'exit', transcript_path: `/${'t'.repeat(5_000)}.jsonl` })
+  const r = await timed(p.root, 'record.mjs', ['--event', 'SessionEnd'], { stdin: text, env: w.env })
+  assert.deepEqual([r.code, r.stdout, r.stderr], [0, '', ''])
+  assert.ok(r.ms < 400, `the hook took ${r.ms}ms, so it waited for the record run`)
+  const calls = await until(() => (p.readCalls().length ? p.readCalls() : null), 'the detached CLI to finish')
+  assert.equal(calls[0].stdin, text)
+})
+
+test('record: PreCompact waits for the CLI to finish', async () => {
+  const w = world()
+  const p = fakePlugin({ delayMs: 2_000 })
+  const r = await timed(p.root, 'record.mjs', ['--event', 'PreCompact'], { stdin: payload(w, { trigger: 'auto' }), env: w.env })
+  assert.deepEqual([r.code, r.stdout, r.stderr], [0, '', ''])
+  assert.ok(r.ms >= 1_900, `the hook took ${r.ms}ms and did not wait`)
+  const calls = p.readCalls()
+  assert.equal(calls.length, 1, 'the call is on file the moment the hook exits')
+  assert.deepEqual(calls[0].argv, ['record', '--event', 'PreCompact'])
+})
+
+for (const withLogs of [false, true]) {
+  test(`record: the SessionEnd CLI's stderr is appended to logs/record.err.log, ${withLogs ? 'with' : 'without'} an existing logs folder, and the hook stays silent`, async () => {
+    const w = world()
+    if (withLogs) mkdirSync(join(w.home, 'logs'))
+    const p = fakePlugin({ stderr: 'dial: boom\n' })
+    const r = await run(p.root, 'record.mjs', ['--event', 'SessionEnd'], { stdin: payload(w), env: w.env })
+    assert.deepEqual([r.code, r.stdout, r.stderr], [0, '', ''])
+    const file = join(w.home, 'logs', 'record.err.log')
+    const text = await until(() => (existsSync(file) && readFileSync(file, 'utf8')) || null, 'the error log to gain the CLI stderr')
+    assert.equal(text, 'dial: boom\n')
+    assert.equal(p.readCalls().length, 1)
+  })
+}
+
+test('record: an error log that cannot be opened still starts the CLI with the payload, silently, and the hook does not wait', async () => {
+  const w = world()
+  mkdirSync(join(w.home, 'logs', 'record.err.log'), { recursive: true })
+  const p = fakePlugin({ stderr: 'dial: boom\n', delayMs: SLOW_MS })
+  const text = payload(w)
+  const r = await timed(p.root, 'record.mjs', ['--event', 'SessionEnd'], { stdin: text, env: w.env })
+  assert.deepEqual([r.code, r.stdout, r.stderr], [0, '', ''])
+  assert.ok(r.ms < 1_000, `the hook took ${r.ms}ms`)
+  const calls = await until(() => (p.readCalls().length ? p.readCalls() : null), 'the CLI to run')
+  assert.deepEqual(calls, [{ argv: ['record', '--event', 'SessionEnd'], stdin: text }])
+})
+
+test('record: a SessionEnd CLI that cannot be started is one stderr line and exit 0', async () => {
+  const w = world()
+  const p = fakePlugin()
+  writeFileSync(join(p.root, 'hooks', 'no-node.mjs'), "process.execPath = '/nonexistent/node'\nawait import('./record.mjs')\n")
+  const r = await run(p.root, 'no-node.mjs', ['--event', 'SessionEnd'], { stdin: payload(w), env: w.env })
+  assert.deepEqual([r.code, r.stdout], [0, ''])
+  assert.match(r.stderr, /^dial record hook error \(ignored\): .+\n$/)
+  assert.deepEqual(p.readCalls(), [])
 })
